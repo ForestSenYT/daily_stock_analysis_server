@@ -168,6 +168,16 @@ python main.py --serve-only
 
 > Docker 部署、定时任务、云服务器访问请参考 [完整指南](docs/full-guide.md)；桌面客户端打包请参考 [桌面端打包说明](docs/desktop-package.md)。
 
+### 方式三：Google Cloud Run 部署（API + Web UI）
+
+服务端 [`server.py`](server.py) 已经做了 Cloud Run 适配（监听 `0.0.0.0:${PORT}`、`/health` 健康检查、`/analyze` HTTP 接口），并叠加了两层独立的鉴权：
+
+- **Web UI 管理员登录**：浏览器访问前端页面前必须先在 `/login` 输入 `ADMIN_PASSWORD`；登录态保存在 Starlette `SessionMiddleware` 的签名 cookie（`SESSION_SECRET_KEY`）里。
+- **API Bearer Token**：`/analyze`、`/analyze/async`、`/tasks/{id}` 由 `API_TOKEN` 保护，请求需带 `Authorization: Bearer <API_TOKEN>`。
+- **`/health` 始终公开**，方便 Cloud Run 健康检查。
+
+详细部署步骤、环境变量说明（`ADMIN_PASSWORD`、`SESSION_SECRET_KEY`、`ENV`、`API_TOKEN` 等）见 [Cloud Run 部署指南](docs/cloud-run-deploy.md)。
+
 ## 📱 推送效果
 
 ### 决策仪表盘

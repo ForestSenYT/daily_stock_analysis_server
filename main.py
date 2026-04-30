@@ -767,12 +767,20 @@ def main() -> int:
     # === 启动 Web 服务 (如果启用) ===
     start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"
 
-    # 兼容旧版 WEBUI_HOST/WEBUI_PORT：如果用户未通过 --host/--port 指定，则使用旧变量
+    # 兼容旧版 WEBUI_HOST/WEBUI_PORT，并叠加 Cloud Run 注入的 PORT/HOST：
+    # 用户未通过 --host/--port 指定时，优先级 PORT/HOST > WEBUI_PORT/WEBUI_HOST > 默认值
     if start_serve:
-        if args.host == '0.0.0.0' and os.getenv('WEBUI_HOST'):
-            args.host = os.getenv('WEBUI_HOST')
-        if args.port == 8000 and os.getenv('WEBUI_PORT'):
-            args.port = int(os.getenv('WEBUI_PORT'))
+        if args.host == '0.0.0.0':
+            host_env = os.getenv('HOST') or os.getenv('WEBUI_HOST')
+            if host_env:
+                args.host = host_env
+        if args.port == 8000:
+            port_env = os.getenv('PORT') or os.getenv('WEBUI_PORT')
+            if port_env:
+                try:
+                    args.port = int(port_env)
+                except ValueError:
+                    logger.warning("忽略非法的 PORT/WEBUI_PORT 值: %s", port_env)
 
     bot_clients_started = False
     if start_serve:

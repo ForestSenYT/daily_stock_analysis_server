@@ -65,4 +65,6 @@ jinja2>=3.1.0               # Jinja2 template engine for report rendering
 # FastAPI Web 框架
 fastapi>=0.109.0            # 现代 Python Web 框架
 uvicorn[standard]>=0.27.0   # ASGI 服务器
+pydantic>=2.5.0             # FastAPI 校验层（Cloud Run server.py 显式依赖）
 python-multipart>=0.0.6     # FastAPI File/Form upload support
+itsdangerous>=2.1.0         # SessionMiddleware 签名 cookie 所需（Web UI 管理员登录）
