@@ -240,4 +240,11 @@ Cloud Run 部署只是**新增**一种部署方式，不破坏原有 CLI：
 - `python main.py --serve-only` 现在会自动读取 `PORT` 环境变量（Cloud Run 注入）
 - GitHub Actions 流水线不受影响
 
-如需**同时打包前端**，请使用 [`docker/Dockerfile`](../docker/Dockerfile)（多阶段构建：node 编译 SPA + python 运行后端）。根目录 `Dockerfile` 是面向 Cloud Run 的精简版本：未构建前端时由 `api.app` 渲染引导页。
+根目录 [`Dockerfile`](../Dockerfile) 现在也是多阶段构建：
+
+1. **Stage 1 (`node:20-slim`)**：在 `apps/dsa-web` 里跑 `npm ci && npm run build`，Vite 把产物写到仓库根的 `static/`。
+2. **Stage 2 (`python:3.11-slim-bookworm`)**：装系统依赖 + Python 依赖，COPY 全量代码，最后 `COPY --from=web-builder /app/static ./static`。
+
+`api.app` 在启动时检测 `static/index.html` 是否存在：存在就把 SPA 挂在 `/`，否则显示 "Frontend Not Built" 引导页。所以新构建出来的镜像不会再出现引导页。
+
+如果只想要后端 API、不带前端（镜像更小），把 Stage 1 删掉、并删掉 `COPY --from=web-builder ...` 这一行即可。`docker/Dockerfile` 仍然保留作为带 wkhtmltopdf 等额外渲染依赖的"完整版"。

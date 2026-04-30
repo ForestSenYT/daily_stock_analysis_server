@@ -5,10 +5,27 @@
 # 1. 直接配合 ``gcloud run deploy --source .`` 使用
 # 2. 监听 0.0.0.0:${PORT}，PORT 由 Cloud Run 注入（默认 8080）
 # 3. 容器启动后持续运行 HTTP 服务（uvicorn）
-# 4. 前端是可选的：未构建时由 api.app 兜底渲染引导页
+# 4. 多阶段构建：先用 node 打包 apps/dsa-web，再把产物（static/）拷进 Python 镜像
 #
-# 如需同时打包前端（apps/dsa-web），请使用 docker/Dockerfile（多阶段构建）。
+# Vite 配置（apps/dsa-web/vite.config.ts）会把构建产物写到仓库根的 static/ 目录，
+# api.app:create_app 启动时会自动检测 static/index.html 并把 SPA 挂在 / 上。
 
+# ---------- Stage 1: 构建前端 SPA ----------
+FROM node:20-slim AS web-builder
+
+WORKDIR /app/apps/dsa-web
+
+# 先单独 COPY 锁文件，最大化 npm 缓存命中
+COPY apps/dsa-web/package.json apps/dsa-web/package-lock.json ./
+RUN npm ci
+
+# 再 COPY 源码，触发实际构建
+COPY apps/dsa-web/ ./
+
+# vite.config.ts 中 outDir 指向 ../../static → /app/static
+RUN npm run build
+
+# ---------- Stage 2: 运行 Python 后端 ----------
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -44,12 +61,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-# 先单独复制 requirements，让依赖层可缓存
+# 先单独 COPY requirements，让 pip 安装层可以缓存
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制应用代码（.dockerignore 会过滤掉 .env / venv / cache 等）
+# COPY 应用代码（.dockerignore 已经过滤 .env / venv / cache 等）
 COPY . .
+
+# 把 Stage 1 构建出的 SPA 静态资源拷进来；index.html 必须存在，
+# api.app 才会把 SPA 挂在 / 上而不是显示 "Frontend Not Built" 引导页。
+COPY --from=web-builder /app/static ./static
 
 # 数据 / 日志目录
 RUN mkdir -p /app/data /app/logs /app/reports
@@ -62,5 +83,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" || exit 1
 
 # 启动命令：监听 0.0.0.0:${PORT}，默认 8080
-# 注意：使用 sh -c 以便展开 ${PORT} 环境变量；Cloud Run 会注入 PORT
+# 注意：使用 sh -c 以便展开 ${PORT}；Cloud Run 会注入 PORT
 CMD ["sh", "-c", "exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips=*"]
