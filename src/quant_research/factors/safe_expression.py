@@ -43,8 +43,9 @@ Usage
 from __future__ import annotations
 
 import ast
+import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, FrozenSet, Mapping, Set
+from typing import Callable, Dict, FrozenSet, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -61,6 +62,13 @@ DEFAULT_ALLOWED_INPUTS: FrozenSet[str] = frozenset(
      "ma5", "ma10", "ma20", "volume_ratio"}
 )
 
+DEFAULT_MAX_NODES = 80
+DEFAULT_MAX_DEPTH = 18
+DEFAULT_MAX_ABS_CONSTANT = 1_000_000
+DEFAULT_MAX_POW_EXPONENT = 8
+DEFAULT_MAX_WINDOW = 365
+DEFAULT_MAX_CALL_ARGS = 5
+
 
 def _safe_log(x):
     return np.log(x.replace(0, np.nan)) if isinstance(x, pd.Series) else np.log(x)
@@ -72,24 +80,46 @@ def _safe_div(a, b):
     return a / b if b != 0 else float("nan")
 
 
+def _coerce_window(n, *, min_value: int = 1) -> int:
+    if isinstance(n, bool):
+        raise UnsafeExpressionError("Window argument must be an integer, not bool.")
+    if isinstance(n, float):
+        if not n.is_integer():
+            raise UnsafeExpressionError("Window argument must be an integer.")
+        value = int(n)
+    else:
+        try:
+            value = int(n)
+        except (TypeError, ValueError) as exc:
+            raise UnsafeExpressionError("Window argument must be an integer.") from exc
+    if value < min_value or value > DEFAULT_MAX_WINDOW:
+        raise UnsafeExpressionError(
+            f"Window argument out of range: {value} "
+            f"(allowed {min_value}..{DEFAULT_MAX_WINDOW})."
+        )
+    return value
+
+
 def _rolling_mean(x: pd.Series, n: int) -> pd.Series:
-    return x.rolling(int(n), min_periods=max(int(n) // 2, 1)).mean()
+    window = _coerce_window(n, min_value=1)
+    return x.rolling(window, min_periods=max(window // 2, 1)).mean()
 
 
 def _rolling_std(x: pd.Series, n: int) -> pd.Series:
-    return x.rolling(int(n), min_periods=max(int(n) // 2, 1)).std()
+    window = _coerce_window(n, min_value=1)
+    return x.rolling(window, min_periods=max(window // 2, 1)).std()
 
 
 def _shift(x: pd.Series, n: int) -> pd.Series:
-    return x.shift(int(n))
+    return x.shift(_coerce_window(n, min_value=0))
 
 
 def _diff(x: pd.Series, n: int = 1) -> pd.Series:
-    return x.diff(int(n))
+    return x.diff(_coerce_window(n, min_value=0))
 
 
 def _pct_change(x: pd.Series, n: int = 1) -> pd.Series:
-    return x.pct_change(int(n))
+    return x.pct_change(_coerce_window(n, min_value=0))
 
 
 def _zscore(x: pd.Series, n: int) -> pd.Series:
@@ -164,6 +194,124 @@ class SafeExpressionSpec:
     expression: str
     allowed_inputs: FrozenSet[str] = field(default=DEFAULT_ALLOWED_INPUTS)
     max_length: int = 512
+    max_nodes: int = DEFAULT_MAX_NODES
+    max_depth: int = DEFAULT_MAX_DEPTH
+    max_abs_constant: float = DEFAULT_MAX_ABS_CONSTANT
+    max_pow_exponent: int = DEFAULT_MAX_POW_EXPONENT
+    max_window: int = DEFAULT_MAX_WINDOW
+    max_call_args: int = DEFAULT_MAX_CALL_ARGS
+
+
+def _node_count(node: ast.AST) -> int:
+    return sum(1 for _ in ast.walk(node))
+
+
+def _node_depth(node: ast.AST) -> int:
+    children = list(ast.iter_child_nodes(node))
+    if not children:
+        return 1
+    return 1 + max(_node_depth(child) for child in children)
+
+
+def _static_number(node: ast.AST) -> Optional[float]:
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = _static_number(node.operand)
+        if operand is None:
+            return None
+        return operand if isinstance(node.op, ast.UAdd) else -operand
+    if isinstance(node, ast.BinOp) and isinstance(
+        node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+    ):
+        left = _static_number(node.left)
+        right = _static_number(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if right == 0:
+            return None
+        return left // right
+    return None
+
+
+def _static_int(node: ast.AST) -> Optional[int]:
+    value = _static_number(node)
+    if value is None or not math.isfinite(value) or not float(value).is_integer():
+        return None
+    return int(value)
+
+
+def _validate_constant(node: ast.Constant, spec: SafeExpressionSpec) -> None:
+    value = node.value
+    if value is None or isinstance(value, bool):
+        return
+    if not isinstance(value, (int, float)):
+        raise UnsafeExpressionError(
+            f"Forbidden constant type: {type(value).__name__}. "
+            "Only finite numbers, booleans, and None are allowed."
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        raise UnsafeExpressionError("Numeric constants must be finite.")
+    if abs(float(value)) > spec.max_abs_constant:
+        raise UnsafeExpressionError(
+            f"Numeric constant too large: {value!r} "
+            f"(max abs {spec.max_abs_constant})."
+        )
+
+
+def _validate_call_shape(node: ast.Call, spec: SafeExpressionSpec) -> None:
+    func = node.func
+    if not isinstance(func, ast.Name):
+        return
+    name = func.id
+
+    fixed_arity = {
+        "mean": 2,
+        "std": 2,
+        "lag": 2,
+        "shift": 2,
+        "zscore": 2,
+        "log": 1,
+        "abs": 1,
+        "div": 2,
+    }
+    if name in fixed_arity and len(node.args) != fixed_arity[name]:
+        raise UnsafeExpressionError(
+            f"Function {name!r} expects {fixed_arity[name]} positional arguments."
+        )
+    if name in {"diff", "pct_change"} and len(node.args) not in {1, 2}:
+        raise UnsafeExpressionError(
+            f"Function {name!r} expects 1 or 2 positional arguments."
+        )
+    if name in {"max", "min"} and not (1 <= len(node.args) <= spec.max_call_args):
+        raise UnsafeExpressionError(
+            f"Function {name!r} expects 1..{spec.max_call_args} arguments."
+        )
+
+    rolling_windows = {"mean", "std", "zscore"}
+    causal_windows = {"lag", "shift", "diff", "pct_change"}
+    if name in rolling_windows or (name in causal_windows and len(node.args) >= 2):
+        window_node = node.args[1]
+        window = _static_int(window_node)
+        min_value = 1 if name in rolling_windows else 0
+        if window is None:
+            raise UnsafeExpressionError(
+                f"Function {name!r} window must be a static integer."
+            )
+        if window < min_value or window > spec.max_window:
+            raise UnsafeExpressionError(
+                f"Function {name!r} window out of range: {window} "
+                f"(allowed {min_value}..{spec.max_window})."
+            )
 
 
 def _validate_node(node: ast.AST, spec: SafeExpressionSpec) -> None:
@@ -174,6 +322,9 @@ def _validate_node(node: ast.AST, spec: SafeExpressionSpec) -> None:
             f"Only basic arithmetic, comparisons, identifiers, and "
             f"whitelisted function calls are allowed."
         )
+
+    if isinstance(node, ast.Constant):
+        _validate_constant(node, spec)
 
     if isinstance(node, ast.Name):
         # Reject dunder identifiers and anything not on the whitelist.
@@ -188,6 +339,16 @@ def _validate_node(node: ast.AST, spec: SafeExpressionSpec) -> None:
                 f"Only OHLCV columns ({sorted(spec.allowed_inputs)}) and "
                 f"whitelisted helpers ({sorted(SAFE_FUNCTIONS.keys())}) "
                 f"may be referenced."
+            )
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+        exponent = _static_int(node.right)
+        if exponent is None:
+            raise UnsafeExpressionError("Power exponent must be a static integer.")
+        if exponent < 0 or exponent > spec.max_pow_exponent:
+            raise UnsafeExpressionError(
+                f"Power exponent out of range: {exponent} "
+                f"(allowed 0..{spec.max_pow_exponent})."
             )
 
     if isinstance(node, ast.Call):
@@ -209,6 +370,7 @@ def _validate_node(node: ast.AST, spec: SafeExpressionSpec) -> None:
             raise UnsafeExpressionError(
                 "Keyword arguments are not allowed in safe expressions."
             )
+        _validate_call_shape(node, spec)
 
     for child in ast.iter_child_nodes(node):
         _validate_node(child, spec)
@@ -229,6 +391,17 @@ def parse_safe_expression(spec: SafeExpressionSpec) -> ast.Expression:
     except SyntaxError as exc:
         raise UnsafeExpressionError(f"Syntax error: {exc.msg}") from exc
 
+    node_count = _node_count(tree)
+    if node_count > spec.max_nodes:
+        raise UnsafeExpressionError(
+            f"Expression has too many AST nodes ({node_count} > {spec.max_nodes})."
+        )
+    depth = _node_depth(tree)
+    if depth > spec.max_depth:
+        raise UnsafeExpressionError(
+            f"Expression AST is too deep ({depth} > {spec.max_depth})."
+        )
+
     _validate_node(tree, spec)
     return tree
 
@@ -245,6 +418,17 @@ def compile_safe_expression(spec: SafeExpressionSpec) -> Callable[[Mapping[str, 
     """
     tree = parse_safe_expression(spec)
 
+    def _safe_pow(a, b):
+        if isinstance(b, pd.Series):
+            raise UnsafeExpressionError("Power exponent cannot be a Series.")
+        exponent = _coerce_window(b, min_value=0)
+        if exponent > spec.max_pow_exponent:
+            raise UnsafeExpressionError(
+                f"Power exponent out of range at runtime: {exponent} "
+                f"(allowed 0..{spec.max_pow_exponent})."
+            )
+        return a ** exponent
+
     # Pre-build the binop / unaryop / compare lookups — keeps the
     # interpreter code below short and free of dynamic ``getattr``.
     BINOPS = {
@@ -254,7 +438,7 @@ def compile_safe_expression(spec: SafeExpressionSpec) -> Callable[[Mapping[str, 
         ast.Div: lambda a, b: _safe_div(a, b),
         ast.FloorDiv: lambda a, b: a // b,
         ast.Mod: lambda a, b: a % b,
-        ast.Pow: lambda a, b: a ** b,
+        ast.Pow: _safe_pow,
     }
     UNOPS = {
         ast.UAdd: lambda x: +x,

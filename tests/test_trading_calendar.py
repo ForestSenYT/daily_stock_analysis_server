@@ -197,6 +197,18 @@ class ComputeEffectiveRegionTestCase(unittest.TestCase):
     def test_single_region_closed(self):
         self.assertEqual(trading_calendar.compute_effective_region("hk", {"cn", "us"}), "")
 
+    def test_comma_subset_intersects_open_markets(self):
+        result = trading_calendar.compute_effective_region("cn,hk", {"hk", "us"})
+        self.assertEqual(result, "hk")
+
+    def test_comma_subset_preserves_configured_order(self):
+        result = trading_calendar.compute_effective_region("us,cn", {"cn", "hk", "us"})
+        self.assertEqual(result, "cn,us")
+
+    def test_comma_subset_all_closed_returns_empty(self):
+        result = trading_calendar.compute_effective_region("cn,hk", {"us"})
+        self.assertEqual(result, "")
+
     def test_invalid_region_defaults_to_cn(self):
         result = trading_calendar.compute_effective_region("invalid", {"cn"})
         self.assertEqual(result, "cn")

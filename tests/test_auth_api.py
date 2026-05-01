@@ -293,7 +293,7 @@ class AuthApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_auth_settings_is_reachable_when_auth_disabled(self) -> None:
+    def test_auth_settings_requires_session_when_auth_disabled(self) -> None:
         scope = {
             "type": "http",
             "method": "POST",
@@ -307,6 +307,29 @@ class AuthApiTestCase(unittest.TestCase):
         }
         request = Request(scope)
         middleware = AuthMiddleware(app=MagicMock())
+        call_next = AsyncMock(return_value=Response(status_code=200))
+
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False):
+            response = asyncio.run(middleware.dispatch(request, call_next))
+
+        self.assertEqual(response.status_code, 401)
+        call_next.assert_not_awaited()
+
+    def test_auth_settings_allows_admin_session_when_auth_disabled(self) -> None:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/settings",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+            "session": {"is_admin": True},
+        }
+        request = Request(scope)
+        middleware = AuthMiddleware(app=MagicMock())
         next_response = Response(status_code=200)
         call_next = AsyncMock(return_value=next_response)
 
@@ -315,6 +338,30 @@ class AuthApiTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         call_next.assert_awaited_once()
+
+    def test_auth_login_and_status_stay_public(self) -> None:
+        middleware = AuthMiddleware(app=MagicMock())
+        for path in ("/api/v1/auth/login", "/api/v1/auth/status"):
+            with self.subTest(path=path):
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": path,
+                    "headers": [],
+                    "query_string": b"",
+                    "scheme": "http",
+                    "client": ("127.0.0.1", 1234),
+                    "server": ("testserver", 80),
+                    "root_path": "",
+                }
+                request = Request(scope)
+                call_next = AsyncMock(return_value=Response(status_code=200))
+
+                with patch("api.middlewares.auth.is_auth_enabled", return_value=True):
+                    response = asyncio.run(middleware.dispatch(request, call_next))
+
+                self.assertEqual(response.status_code, 200)
+                call_next.assert_awaited_once()
 
     def test_auth_settings_enable_sets_initial_password_and_logs_in(self) -> None:
         self.env_path.write_text(

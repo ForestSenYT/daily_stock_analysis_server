@@ -37,8 +37,10 @@ import hmac
 import html
 import logging
 import os
+import re
 import secrets
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -71,6 +73,12 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
 
 from api.app import app  # noqa: E402  (FastAPI instance, reused as-is)
+from src.auth import (  # noqa: E402
+    check_rate_limit,
+    clear_rate_limit,
+    get_client_ip,
+    record_login_failure,
+)
 
 
 # ============================================================
@@ -87,6 +95,44 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _env_stock_list() -> List[str]:
     raw = os.environ.get("STOCK_LIST", "") or ""
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: Optional[int] = None) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, using default %s", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%s below minimum %s, using default %s", name, value, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s=%s above maximum %s, using default %s", name, value, maximum, default)
+        return default
+    return value
+
+
+def _warn_sqlite_cloudrun_worker_constraints() -> None:
+    db_url = str(_config.get_db_url())
+    if not db_url.startswith("sqlite"):
+        return
+    worker_values = [
+        _env_int("WEB_CONCURRENCY", 1, minimum=1, maximum=128),
+        _env_int("UVICORN_WORKERS", 1, minimum=1, maximum=128),
+    ]
+    if max(worker_values) > 1:
+        logger.error(
+            "[storage] SQLite is configured with multiple web workers. "
+            "SQLite on a Cloud Run/GCS-mounted filesystem is supported only "
+            "with a single uvicorn worker and max-instances=1; use Cloud SQL "
+            "or a single-writer queue before scaling workers."
+        )
+
+
+_warn_sqlite_cloudrun_worker_constraints()
 
 
 # ============================================================
@@ -157,15 +203,17 @@ _PUBLIC_EXACT = frozenset({
     "/robots.txt",
 })
 
-# /api/v1/auth 子路径必须保持公开，否则 WebUI 自身的登录流程会被前端拦截层挡住
-_PUBLIC_PREFIX = (
-    "/api/v1/auth/",
-)
+# WebUI auth bootstrap endpoints stay public. Mutating auth endpoints
+# (/settings, /change-password, /logout) must still require an admin session.
+_PUBLIC_API_AUTH_EXACT = frozenset({
+    "/api/v1/auth/login",
+    "/api/v1/auth/status",
+})
 
 # Cloud Run /analyze 系列：走 API_TOKEN Bearer 校验（路由层 dependency 实现），
 # 跟管理员浏览器 session 解耦——给程序化调用方用
 _BEARER_API_PREFIX = (
-    "/analyze",
+    "/analyze/",
     "/tasks/",
 )
 
@@ -177,12 +225,10 @@ _SESSION_API_PREFIX = (
 
 
 def _is_public_path(path: str) -> bool:
-    if path in _PUBLIC_EXACT:
+    normalized = path.rstrip("/") or "/"
+    if normalized in _PUBLIC_EXACT:
         return True
-    for prefix in _PUBLIC_PREFIX:
-        if path.startswith(prefix):
-            return True
-    return False
+    return normalized in _PUBLIC_API_AUTH_EXACT
 
 
 def _is_bearer_api(path: str) -> bool:
@@ -245,7 +291,12 @@ __ERROR_BLOCK__
 """
 
 
-def _render_login_page(error: str | None = None, next_path: str | None = None) -> HTMLResponse:
+def _render_login_page(
+    error: str | None = None,
+    next_path: str | None = None,
+    *,
+    status_code: Optional[int] = None,
+) -> HTMLResponse:
     error_block = (
         f'<div class="err">{html.escape(error)}</div>' if error else ""
     )
@@ -257,7 +308,10 @@ def _render_login_page(error: str | None = None, next_path: str | None = None) -
         .replace("__ERROR_BLOCK__", error_block)
         .replace("__NEXT_QUERY__", next_query)
     )
-    return HTMLResponse(content=body, status_code=200 if not error else 401)
+    return HTMLResponse(
+        content=body,
+        status_code=status_code if status_code is not None else (200 if not error else 401),
+    )
 
 
 def _safe_next_path(raw: str | None) -> str:
@@ -318,13 +372,22 @@ class AdminLoginMiddleware(BaseHTTPMiddleware):
                     return _render_login_page(
                         error="ADMIN_PASSWORD is not configured on the server.",
                     )
+                ip = get_client_ip(request)
+                if not check_rate_limit(ip):
+                    logger.warning("admin login rate limited from %s", ip)
+                    return _render_login_page(
+                        error="Too many failed attempts. Please try again later.",
+                        status_code=429,
+                    )
                 if submitted and hmac.compare_digest(submitted, _ADMIN_PASSWORD):
+                    clear_rate_limit(ip)
                     request.session["is_admin"] = True
                     request.session["login_at"] = datetime.utcnow().isoformat()
                     target = _safe_next_path(
                         form.get("next") or request.query_params.get("next")
                     )
                     return RedirectResponse(target, status_code=303)
+                record_login_failure(ip)
                 logger.info("admin login failed from %s", request.client.host if request.client else "?")
                 return _render_login_page(error="Invalid admin password")
             return Response(status_code=405, headers={"Allow": "GET, POST"})
@@ -347,7 +410,7 @@ class AdminLoginMiddleware(BaseHTTPMiddleware):
         if not _ADMIN_PASSWORD:
             return await call_next(request)
 
-        # ----- /api/v1/* (除 /api/v1/auth/*)：要求 session，未登录给 401 JSON -----
+        # ----- /api/v1/*: require admin session; only auth login/status are public -----
         if _is_session_api(path):
             if request.session.get("is_admin") is True:
                 return await call_next(request)
@@ -422,6 +485,36 @@ def _allowed_oidc_invokers() -> list[str]:
     return allowed
 
 
+def _looks_like_jwt(token: str) -> bool:
+    parts = token.split(".")
+    return len(parts) == 3 and all(parts)
+
+
+def _expected_oidc_audiences() -> list[str]:
+    raw_multi = (os.environ.get("OIDC_EXPECTED_AUDIENCES") or "").strip()
+    raw_single = (os.environ.get("OIDC_EXPECTED_AUDIENCE") or "").strip()
+    values: list[str] = []
+    if raw_multi:
+        values.extend(part.strip() for part in raw_multi.split(",") if part.strip())
+    elif raw_single:
+        values.append(raw_single)
+    else:
+        try:
+            from src.services.cloud_scheduler_service import _detect_cloud_run_url
+            detected = _detect_cloud_run_url()
+            if detected:
+                values.append(detected)
+        except Exception:
+            pass
+
+    audiences: list[str] = []
+    for value in values:
+        normalized = value.rstrip("/")
+        if normalized and normalized not in audiences:
+            audiences.append(normalized)
+    return audiences
+
+
 def _try_verify_oidc_token(token: str) -> Optional[str]:
     """Validate a Google-signed OIDC ID token. Returns the verified email
     (caller identity) on success, or None on any failure."""
@@ -431,21 +524,20 @@ def _try_verify_oidc_token(token: str) -> Optional[str]:
     except ImportError:
         return None
 
-    try:
-        # audience can be the canonical Cloud Run service URL or any value
-        # Cloud Scheduler put in the OidcToken.audience field.
-        from src.services.cloud_scheduler_service import _detect_cloud_run_url
-        expected_audience = (
-            os.environ.get("OIDC_EXPECTED_AUDIENCE")
-            or _detect_cloud_run_url()
-        )
-        if not expected_audience:
-            return None
-        info = g_id_token.verify_oauth2_token(
-            token,
-            g_requests.Request(),
-            audience=expected_audience,
-        )
+    audiences = _expected_oidc_audiences()
+    if not audiences:
+        return None
+
+    for audience in audiences:
+        try:
+            info = g_id_token.verify_oauth2_token(
+                token,
+                g_requests.Request(),
+                audience=audience,
+            )
+        except Exception as exc:
+            logger.debug("OIDC verify failed for configured audience: %s", exc)
+            continue
         email = (info.get("email") or "").strip()
         if not email:
             return None
@@ -453,9 +545,7 @@ def _try_verify_oidc_token(token: str) -> Optional[str]:
             logger.warning("OIDC caller %s not in allowed invoker list", email)
             return None
         return email
-    except Exception as exc:
-        logger.debug("OIDC verify failed: %s", exc)
-        return None
+    return None
 
 
 def _require_api_token(request: Request) -> None:
@@ -485,11 +575,11 @@ def _require_api_token(request: Request) -> None:
     presented = parts[1].strip()
 
     # 1) Static API_TOKEN match (manual / client-script callers)
-    if static_token and presented == static_token:
+    if static_token and hmac.compare_digest(presented, static_token):
         return
 
     # 2) OIDC ID token (Cloud Scheduler / cron callers)
-    if invoker_allowlist:
+    if invoker_allowlist and _looks_like_jwt(presented):
         verified_email = _try_verify_oidc_token(presented)
         if verified_email is not None:
             request.state.oidc_invoker = verified_email
@@ -505,6 +595,46 @@ def _require_api_token(request: Request) -> None:
 # ============================================================
 # 请求 / 响应模型（Cloud Run 接口专用，独立于 /api/v1）
 # ============================================================
+
+_CLOUD_RUN_MAX_STOCKS = _env_int("CLOUD_RUN_ANALYZE_MAX_STOCKS", 50, minimum=1, maximum=200)
+_CLOUD_RUN_MAX_STOCK_CODE_LENGTH = _env_int(
+    "CLOUD_RUN_MAX_STOCK_CODE_LENGTH",
+    20,
+    minimum=1,
+    maximum=64,
+)
+_STOCK_CODE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_cloudrun_stocks(stocks: List[str]) -> List[str]:
+    if not stocks:
+        raise ValueError("stock list is empty")
+    if len(stocks) > _CLOUD_RUN_MAX_STOCKS:
+        raise ValueError(f"too many stocks; max {_CLOUD_RUN_MAX_STOCKS}")
+    cleaned: List[str] = []
+    for raw in stocks:
+        code = (raw or "").strip()
+        if not code:
+            raise ValueError("stock code cannot be empty")
+        if len(code) > _CLOUD_RUN_MAX_STOCK_CODE_LENGTH:
+            raise ValueError(
+                f"stock code {code!r} is too long; max {_CLOUD_RUN_MAX_STOCK_CODE_LENGTH}"
+            )
+        if not _STOCK_CODE_PATTERN.fullmatch(code):
+            raise ValueError(f"stock code {code!r} contains unsupported characters")
+        cleaned.append(code)
+    return cleaned
+
+
+def _resolve_cloudrun_stocks(payload: "CloudRunAnalyzeRequest") -> List[str]:
+    try:
+        return _validate_cloudrun_stocks(payload.stocks or _env_stock_list())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "validation_error", "message": str(exc)},
+        ) from exc
+
 
 class CloudRunAnalyzeRequest(BaseModel):
     stocks: Optional[List[str]] = Field(
@@ -551,14 +681,51 @@ class CloudRunTaskState(BaseModel):
 # 内存任务表（Cloud Run 单实例够用；多实例请用 Cloud Tasks/Pub-Sub）
 # ============================================================
 
+_ASYNC_TASK_TTL_SECONDS = _env_int("CLOUD_RUN_ASYNC_TASK_TTL_SECONDS", 86400, minimum=60)
+_ASYNC_MAX_TASKS = _env_int("CLOUD_RUN_ASYNC_MAX_TASKS", 20, minimum=1, maximum=1000)
+_ASYNC_MAX_ACTIVE_TASKS = _env_int("CLOUD_RUN_ASYNC_MAX_ACTIVE_TASKS", 1, minimum=1, maximum=50)
 _TASKS: Dict[str, Dict[str, Any]] = {}
 _TASKS_LOCK = threading.Lock()
+
+
+def _purge_expired_tasks_locked(now_ts: Optional[float] = None) -> None:
+    now_value = now_ts if now_ts is not None else time.time()
+    expired = [
+        task_id
+        for task_id, task in _TASKS.items()
+        if float(task.get("expires_at", 0) or 0) <= now_value
+    ]
+    for task_id in expired:
+        _TASKS.pop(task_id, None)
+
+
+def _active_task_count_locked() -> int:
+    return sum(1 for task in _TASKS.values() if task.get("status") in {"pending", "running"})
+
+
+def _trim_terminal_task_locked() -> bool:
+    terminal = [
+        (task.get("updated_at") or task.get("created_at") or "", task_id)
+        for task_id, task in _TASKS.items()
+        if task.get("status") in {"success", "failed"}
+    ]
+    if not terminal:
+        return False
+    _, oldest_task_id = sorted(terminal)[0]
+    _TASKS.pop(oldest_task_id, None)
+    return True
 
 
 def _new_task(stocks: List[str]) -> str:
     task_id = uuid.uuid4().hex
     now = datetime.utcnow().isoformat()
+    expires_at = time.time() + _ASYNC_TASK_TTL_SECONDS
     with _TASKS_LOCK:
+        _purge_expired_tasks_locked()
+        if _active_task_count_locked() >= _ASYNC_MAX_ACTIVE_TASKS:
+            raise RuntimeError("too_many_active_async_tasks")
+        if len(_TASKS) >= _ASYNC_MAX_TASKS and not _trim_terminal_task_locked():
+            raise RuntimeError("too_many_async_tasks")
         _TASKS[task_id] = {
             "task_id": task_id,
             "status": "pending",
@@ -567,6 +734,7 @@ def _new_task(stocks: List[str]) -> str:
             "error": None,
             "created_at": now,
             "updated_at": now,
+            "expires_at": expires_at,
         }
     return task_id
 
@@ -582,6 +750,7 @@ def _update_task(task_id: str, **fields: Any) -> None:
 
 def _get_task(task_id: str) -> Optional[Dict[str, Any]]:
     with _TASKS_LOCK:
+        _purge_expired_tasks_locked()
         task = _TASKS.get(task_id)
         return dict(task) if task else None
 
@@ -615,10 +784,10 @@ def _analyze_one(stock_code: str, report_type: str) -> tuple[Dict[str, Any], Opt
             full_report=full_report,
             notifier=None,  # per-stock email suppressed
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("analyze_stock raised for %s", stock_code)
         return (
-            {"stock_code": stock_code, "success": False, "error": str(exc)},
+            {"stock_code": stock_code, "success": False, "error": "analysis_exception"},
             None,
         )
 
@@ -680,9 +849,9 @@ def _run_analysis(stocks: List[str], request: CloudRunAnalyzeRequest) -> List[Di
             api_results.append(api_dict)
             if raw is not None:
                 raw_results.append(raw)
-        except Exception as exc:  # 单只股票失败不影响整体
+        except Exception:  # 单只股票失败不影响整体
             logger.exception("Cloud Run /analyze 失败: stock=%s", code)
-            api_results.append({"stock_code": code, "success": False, "error": str(exc)})
+            api_results.append({"stock_code": code, "success": False, "error": "analysis_exception"})
 
     if not request.notify:
         return api_results
@@ -771,9 +940,13 @@ async def cloud_run_info() -> Dict[str, Any]:
         "login": "/login",
         "analyze": "/analyze",
         "analyze_async": "/analyze/async",
-        "default_stock_list": _env_stock_list(),
         "api_token_required": bool((os.environ.get("API_TOKEN") or "").strip()),
         "admin_login_required": bool(_ADMIN_PASSWORD),
+        "limits": {
+            "max_stocks_per_analyze": _CLOUD_RUN_MAX_STOCKS,
+            "async_max_active_tasks": _ASYNC_MAX_ACTIVE_TASKS,
+            "async_task_ttl_seconds": _ASYNC_TASK_TTL_SECONDS,
+        },
     }
 
 
@@ -790,7 +963,7 @@ async def cloud_run_health() -> Dict[str, str]:
     dependencies=[Depends(_require_api_token)],
 )
 async def cloud_run_analyze(payload: CloudRunAnalyzeRequest) -> CloudRunAnalyzeResponse:
-    stocks = payload.stocks or _env_stock_list()
+    stocks = _resolve_cloudrun_stocks(payload)
     if not stocks:
         raise HTTPException(
             status_code=400,
@@ -816,13 +989,13 @@ async def cloud_run_analyze(payload: CloudRunAnalyzeRequest) -> CloudRunAnalyzeR
         # 现有 AnalysisService 是同步实现，必须扔到 threadpool 里跑，
         # 否则会阻塞 uvicorn 的事件循环。
         results = await run_in_threadpool(_run_analysis, stocks, payload)
-    except Exception as exc:  # pragma: no cover - 顶层兜底
+    except Exception:  # pragma: no cover - 顶层兜底
         logger.exception("Cloud Run /analyze 整体失败")
         return CloudRunAnalyzeResponse(
             success=False,
             stocks=stocks,
             result=[],
-            error=str(exc),
+            error="analysis_failed",
         )
 
     success = all(item.get("success") for item in results) if results else False
@@ -848,9 +1021,9 @@ def _async_runner(task_id: str, stocks: List[str], payload: CloudRunAnalyzeReque
             result=results,
             error=None if success else "one_or_more_stocks_failed",
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Cloud Run /analyze/async 任务失败 task=%s", task_id)
-        _update_task(task_id, status="failed", error=str(exc))
+        _update_task(task_id, status="failed", error="analysis_exception")
 
 
 @app.post(
@@ -862,7 +1035,7 @@ def _async_runner(task_id: str, stocks: List[str], payload: CloudRunAnalyzeReque
     dependencies=[Depends(_require_api_token)],
 )
 async def cloud_run_analyze_async(payload: CloudRunAnalyzeRequest) -> CloudRunAsyncAccepted:
-    stocks = payload.stocks or _env_stock_list()
+    stocks = _resolve_cloudrun_stocks(payload)
     if not stocks:
         raise HTTPException(
             status_code=400,
@@ -872,7 +1045,25 @@ async def cloud_run_analyze_async(payload: CloudRunAnalyzeRequest) -> CloudRunAs
             },
         )
 
-    task_id = _new_task(stocks)
+    try:
+        task_id = _new_task(stocks)
+    except RuntimeError as exc:
+        code = str(exc)
+        if code == "too_many_active_async_tasks":
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "too_many_active_async_tasks",
+                    "message": "Too many async analyses are already running.",
+                },
+            ) from exc
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "too_many_async_tasks",
+                "message": "Too many async task records are retained; retry later.",
+            },
+        ) from exc
     thread = threading.Thread(
         target=_async_runner,
         args=(task_id, stocks, payload),

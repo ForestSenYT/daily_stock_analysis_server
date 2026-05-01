@@ -25,12 +25,29 @@ EXEMPT_PATHS = frozenset({
     "/redoc",
     "/openapi.json",
 })
+AUTH_PREFIX = "/api/v1/auth/"
+PUBLIC_AUTH_PATHS = frozenset({
+    "/api/v1/auth/login",
+    "/api/v1/auth/status",
+})
 
 
 def _path_exempt(path: str) -> bool:
     """Check if path is exempt from auth."""
     normalized = path.rstrip("/") or "/"
     return normalized in EXEMPT_PATHS
+
+
+def _has_valid_admin_session(request: Request) -> bool:
+    """Accept either Cloud Run admin session or legacy API auth session."""
+    try:
+        if request.session.get("is_admin") is True:
+            return True
+    except (AssertionError, RuntimeError):
+        pass
+
+    cookie_val = request.cookies.get(COOKIE_NAME)
+    return bool(cookie_val and verify_session(cookie_val))
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -41,9 +58,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable,
     ):
-        if not is_auth_enabled():
-            return await call_next(request)
-
         path = request.url.path
         if _path_exempt(path):
             return await call_next(request)
@@ -51,8 +65,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api/v1/"):
             return await call_next(request)
 
-        cookie_val = request.cookies.get(COOKIE_NAME)
-        if not cookie_val or not verify_session(cookie_val):
+        normalized_path = path.rstrip("/") or "/"
+        if normalized_path in PUBLIC_AUTH_PATHS:
+            return await call_next(request)
+
+        protected_auth_mutation = path.rstrip("/").startswith(AUTH_PREFIX)
+        if not is_auth_enabled() and not protected_auth_mutation:
+            return await call_next(request)
+
+        if not _has_valid_admin_session(request):
             return JSONResponse(
                 status_code=401,
                 content={

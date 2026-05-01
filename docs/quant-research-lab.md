@@ -125,6 +125,15 @@ functions (`mean / std / lag / shift / diff / pct_change / zscore / log /
 abs / max / min / div`). `eval` / `exec` / `__import__` / attribute
 access / dunder names are unconditionally rejected.
 
+The evaluator also applies resource and causality limits before any
+expression can run: only `int` / `float` / `bool` / `None` constants are
+accepted, strings/bytes/Ellipsis are rejected, AST node count and depth are
+capped, numeric constants are bounded, `**` requires a small static
+non-negative integer exponent, rolling windows are capped, and
+`shift` / `lag` / `diff` / `pct_change` periods must be statically known
+non-negative integers. Negative periods are rejected because they would read
+future rows.
+
 Response (`FactorEvaluationResult`):
 ```json
 {
@@ -160,6 +169,7 @@ Response (`FactorEvaluationResult`):
     "lookback_buffer_days": 21,
     "min_stocks_per_day_for_ic": 5,
     "no_lookahead": true,
+    "causal_validation": "builtin_registry_causal_review",
     "evaluator_version": "phase-2",
     "evaluated_at": "2026-05-01T12:00:00+00:00"
   }
@@ -173,8 +183,9 @@ Response (`FactorEvaluationResult`):
 **No look-ahead invariant**: factor signal at date *t* is computed
 using only rows ≤ *t*; forward return at *t* is `close[t+window]/close[t]
 - 1` paired exclusively with the *t*-stamped factor value. The
-`assumptions.no_lookahead` flag is part of the response contract — if a
-future implementation breaks it, this flag must flip.
+`assumptions.no_lookahead` is set to `true` only after the evaluator records
+which causal validation path was used (`builtin_registry_causal_review` for
+built-ins, `safe_expression_static_validation` for custom expressions).
 
 ## Roadmap
 

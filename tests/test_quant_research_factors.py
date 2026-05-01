@@ -99,17 +99,33 @@ class SafeExpressionRejectsDangerousInputsTests(unittest.TestCase):
         "globals()",
         "locals()",
         "1; print(1)",
+        "(x := close)",
+        "f'{close}'",
+        "'x' * 1000",
+        "b'x'",
+        "...",
+        "9**9**9",
+        "close ** 9",
+        "mean(close, 366)",
+        "shift(close, -1)",
+        "diff(close, -1)",
+        "pct_change(close, -1)",
+        "shift(close, volume)",
     )
 
     LEGAL = (
         "close",
         "close - mean(close, 20)",
+        "close / mean(close, 20) - 1",
         "log(close) - log(close)",
         "(high + low) / 2",
         "close > mean(close, 20)",
+        "diff(close)",
         "diff(close, 5) / mean(close, 20)",
+        "pct_change(close)",
         "abs(pct_chg)",
         "zscore(volume, 20)",
+        "shift(close, 1)",
         "(close / shift(close, 1)) - 1",
     )
 
@@ -142,6 +158,23 @@ class SafeExpressionRejectsDangerousInputsTests(unittest.TestCase):
         fn = compile_safe_expression(spec)
         with self.assertRaises(UnsafeExpressionError):
             fn({"close": pd.Series([1.0]), "evil": pd.Series([1.0])})
+
+    def test_expression_resource_limits_are_enforced(self) -> None:
+        cases = (
+            SafeExpressionSpec(expression="close + volume", max_nodes=3),
+            SafeExpressionSpec(expression="+++++++++++++++++++close", max_depth=5),
+            SafeExpressionSpec(expression="close + 1000001", max_abs_constant=1_000_000),
+        )
+        for spec in cases:
+            with self.subTest(expression=spec.expression):
+                with self.assertRaises(UnsafeExpressionError):
+                    compile_safe_expression(spec)
+
+    def test_custom_factor_cannot_reference_future_series(self) -> None:
+        with self.assertRaises(UnsafeExpressionError):
+            compile_safe_expression(
+                SafeExpressionSpec(expression="shift(close, -5) / close - 1")
+            )
 
 
 # =====================================================================
@@ -255,6 +288,7 @@ class EvaluatorEndToEndTests(unittest.TestCase):
     def test_assumptions_record_no_lookahead(self) -> None:
         out = self._eval(builtin_id="return_1d", forward_window=5)
         self.assertTrue(out.assumptions["no_lookahead"])
+        self.assertEqual(out.assumptions["causal_validation"], "builtin_registry_causal_review")
         self.assertEqual(out.assumptions["evaluator_version"], "phase-2")
 
     def test_coverage_reports_missing_stock(self) -> None:

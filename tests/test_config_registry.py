@@ -9,8 +9,10 @@ import unittest
 
 from src.core.config_registry import (
     build_schema_response,
+    get_category_definitions,
     get_field_definition,
 )
+from api.v1.schemas.system_config import SystemConfigFieldSchema
 
 
 class TestSlackFieldsRegistered(unittest.TestCase):
@@ -139,6 +141,25 @@ class TestDiscordInteractionPublicKeyField(unittest.TestCase):
         self.assertIsNotNone(notification_cat, "notification category missing")
         field_keys = {f["key"] for f in notification_cat["fields"]}
         self.assertIn("DISCORD_INTERACTIONS_PUBLIC_KEY", field_keys)
+
+
+class TestConfigCategorySchemaCompatibility(unittest.TestCase):
+    def test_registry_categories_are_accepted_by_api_schema_literal(self):
+        for category in get_category_definitions():
+            category_id = category["category"]
+            with self.subTest(category=category_id):
+                SystemConfigFieldSchema(
+                    key=f"TEST_{category_id.upper()}",
+                    title="Test",
+                    description="Test field",
+                    category=category_id,
+                    data_type="string",
+                    ui_control="text",
+                    is_sensitive=False,
+                    is_required=False,
+                    is_editable=True,
+                    display_order=9999,
+                )
 
 
 if __name__ == "__main__":

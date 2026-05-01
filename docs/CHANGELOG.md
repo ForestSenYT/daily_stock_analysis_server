@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 收紧 Cloud Run/WebUI 鉴权边界：`/api/v1/auth/settings`、`/change-password`、`/logout` 需要管理员 session，`/login` 增加失败限流，`API_TOKEN` 使用 constant-time 比较且非 JWT bearer 不再进入 OIDC 验证。
+- [改进] `/analyze` 与 `/analyze/async` 增加股票数量、代码长度和字符格式限制；异步任务增加并发上限、TTL 与最大内存记录数，`/info` 不再公开 `STOCK_LIST`。
+- [改进] Cloud Scheduler OIDC 支持 `OIDC_EXPECTED_AUDIENCES` 多 audience 配置，并与服务端校验使用同一 canonical audience。
+- [修复] Quant safe expression 增加常量类型、AST 节点数/深度、数值大小、幂指数、rolling window 与非负 shift/diff/pct_change 周期限制，防止未来函数和资源消耗型表达式。
+- [修复] `MARKET_REVIEW_REGION` 逗号子集在交易日过滤中按 open markets 求交集，保持 `cn,hk` 等配置语义一致。
+- [测试] 新增鉴权、Cloud Run 限流/OIDC、Quant safe expression/no-lookahead、交易日子集和 config category/schema 一致性回归测试。
+
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 - [新功能] Quant Research Lab 基础设施落地：feature flag `QUANT_RESEARCH_ENABLED`（默认 false）、独立模块 `src/quant_research/`、API `/api/v1/quant/status` 与 `/api/v1/quant/capabilities`，与现有 `/api/v1/backtest/*` AI 决策回测语义完全分开。

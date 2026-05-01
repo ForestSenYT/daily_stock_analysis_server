@@ -39,6 +39,9 @@ from src.quant_research.service import QuantResearchService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_QUANT_DISABLED_MESSAGE = "Quant Research Lab is disabled."
+_QUANT_VALIDATION_MESSAGE = "Invalid quant research request."
+_QUANT_ERROR_MESSAGE = "Quant Research operation failed."
 
 
 def _service() -> QuantResearchService:
@@ -67,7 +70,7 @@ def quant_status() -> QuantResearchStatus:
         logger.warning("Quant Research status surfaced a domain error: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"error": "quant_research_error", "message": str(exc)},
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
         )
 
 
@@ -89,7 +92,7 @@ def quant_capabilities() -> QuantResearchCapabilities:
         logger.warning("Quant Research capabilities surfaced a domain error: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"error": "quant_research_error", "message": str(exc)},
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
         )
 
 
@@ -128,7 +131,7 @@ def quant_list_factors() -> FactorRegistryResponse:
         logger.warning("Quant Research list_factors error: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"error": "quant_research_error", "message": str(exc)},
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
         )
 
 
@@ -156,14 +159,14 @@ def quant_list_factors() -> FactorRegistryResponse:
 def quant_evaluate_factor(request: FactorEvaluationRequest) -> FactorEvaluationResult:
     try:
         return _service().evaluate_factor(request)
-    except QuantResearchDisabledError as exc:
+    except QuantResearchDisabledError:
         # Disabled flag — surface as a structured 503 so SPA can render
         # the "enable in settings" hint instead of a generic error.
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "quant_research_disabled",
-                "message": str(exc),
+                "message": _QUANT_DISABLED_MESSAGE,
             },
         )
     except QuantResearchValidationError as exc:
@@ -171,13 +174,13 @@ def quant_evaluate_factor(request: FactorEvaluationRequest) -> FactorEvaluationR
             status_code=400,
             detail={
                 "error": "quant_research_validation",
-                "message": str(exc),
+                "message": _QUANT_VALIDATION_MESSAGE,
                 "field": exc.field,
             },
         )
-    except QuantResearchError as exc:
+    except QuantResearchError:
         logger.exception("Quant Research evaluate_factor failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "quant_research_error", "message": str(exc)},
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
         )

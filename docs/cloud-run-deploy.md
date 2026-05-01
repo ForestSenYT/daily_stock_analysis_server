@@ -75,8 +75,6 @@ curl -X POST http://127.0.0.1:8080/analyze \
   -d '{"stocks":["NVDA"],"market":"us","dry_run":true}'
 ```
 
----
-
 ## 4. Web UI 管理员登录（Admin Login）
 
 部署到 Cloud Run 之后，浏览器访问 `https://<your-cloud-run-url>/` 会被重定向到 `/login`。
@@ -212,6 +210,31 @@ curl -X POST "$URL/analyze/async" \
 # 查询状态
 curl -H "Authorization: Bearer $TOKEN" "$URL/tasks/abc123..."
 ```
+
+---
+
+### 7.1 Cloud Run async task limits
+
+`/analyze/async` is intentionally still an in-memory helper in this release.
+Task state is not durable: a Cloud Run instance restart, scale-to-zero event,
+new revision, or multiple-worker deployment can lose task records and running
+background threads. Keep `max-instances=1` and one uvicorn worker when using
+SQLite on a GCS/gcsfuse volume; migrate async execution to Cloud Tasks or a
+DB-backed task table before increasing instances or workers.
+
+Runtime limits:
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `CLOUD_RUN_ANALYZE_MAX_STOCKS` | `50` | Maximum stocks accepted by `/analyze` and `/analyze/async`. |
+| `CLOUD_RUN_MAX_STOCK_CODE_LENGTH` | `20` | Maximum single stock-code length. |
+| `CLOUD_RUN_ASYNC_MAX_ACTIVE_TASKS` | `1` | Concurrent in-memory async analyses per instance. |
+| `CLOUD_RUN_ASYNC_MAX_TASKS` | `20` | Maximum retained in-memory task records. |
+| `CLOUD_RUN_ASYNC_TASK_TTL_SECONDS` | `86400` | TTL before task records are purged. |
+| `OIDC_EXPECTED_AUDIENCES` | unset | Comma-separated accepted Google OIDC audiences; the first value is used when syncing Cloud Scheduler. |
+
+`GET /info` reports operational limits but does not return `STOCK_LIST` or
+the effective watchlist.
 
 ---
 

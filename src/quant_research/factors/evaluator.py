@@ -191,6 +191,14 @@ def _resolve_factor_callable(inputs: FactorEvalInputs) -> Tuple[Callable[[pd.Dat
     raise ValueError("Either builtin_id or expression must be provided.")
 
 
+def _causal_validation_label(factor_kind: str) -> str:
+    if factor_kind == "builtin":
+        return "builtin_registry_causal_review"
+    if factor_kind == "expression":
+        return "safe_expression_static_validation"
+    return ""
+
+
 def _factor_signal_for_stock(df: pd.DataFrame, fn: Callable[[pd.DataFrame], pd.Series]) -> pd.Series:
     """Compute the factor signal as a Series indexed by date for one stock.
 
@@ -357,6 +365,9 @@ def evaluate_factor(inputs: FactorEvalInputs) -> FactorEvalOutputs:
     ``t`` signal value.
     """
     fn, factor_kind, builtin_id = _resolve_factor_callable(inputs)
+    causal_validation = _causal_validation_label(factor_kind)
+    if not causal_validation:
+        raise ValueError("factor failed causal validation")
 
     # Look-up factor display name. For builtins, prefer the registry
     # entry's friendly name; for expressions, the user-supplied name (or
@@ -413,7 +424,8 @@ def evaluate_factor(inputs: FactorEvalInputs) -> FactorEvalOutputs:
             start=start,
             end=end,
             diagnostics=diagnostics + ["No stock had usable history; "
-                                       "evaluation produced no metrics."],
+                                        "evaluation produced no metrics."],
+            causal_validation=causal_validation,
         )
 
     # Build cross-sectional panels: rows = dates, cols = stocks.
@@ -499,7 +511,8 @@ def evaluate_factor(inputs: FactorEvalInputs) -> FactorEvalOutputs:
         assumptions={
             "lookback_buffer_days": lookback_buffer,
             "min_stocks_per_day_for_ic": MIN_STOCKS_PER_DAY_FOR_IC,
-            "no_lookahead": True,
+            "no_lookahead": bool(causal_validation),
+            "causal_validation": causal_validation,
             "evaluator_version": "phase-2",
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -515,6 +528,7 @@ def _empty_result(
     start: date,
     end: date,
     diagnostics: List[str],
+    causal_validation: str,
 ) -> FactorEvalOutputs:
     """Construct a structurally-valid result for the "no usable data"
     case so the API still returns 200 with explainable empties rather
@@ -556,7 +570,8 @@ def _empty_result(
         },
         diagnostics=diagnostics,
         assumptions={
-            "no_lookahead": True,
+            "no_lookahead": bool(causal_validation),
+            "causal_validation": causal_validation,
             "evaluator_version": "phase-2",
             "evaluated_at": datetime.now(timezone.utc).isoformat(),
         },

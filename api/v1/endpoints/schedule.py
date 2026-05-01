@@ -37,6 +37,9 @@ from src.services.cloud_scheduler_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_SCHEDULER_NOT_CONFIGURED_MESSAGE = "Cloud Scheduler is not configured for this deployment."
+_SCHEDULER_UPSTREAM_MESSAGE = "Cloud Scheduler request failed."
+_SCHEDULER_INTERNAL_MESSAGE = "Cloud Scheduler operation failed."
 
 
 def _service() -> CloudSchedulerService:
@@ -76,16 +79,19 @@ def _to_status(payload: dict) -> ScheduleStatusResponse:
 def schedule_status() -> ScheduleStatusResponse:
     try:
         return _to_status(_service().status())
-    except CloudSchedulerNotConfigured as exc:
+    except CloudSchedulerNotConfigured:
         raise HTTPException(
             status_code=503,
-            detail={"error": "scheduler_not_configured", "message": str(exc)},
+            detail={
+                "error": "scheduler_not_configured",
+                "message": _SCHEDULER_NOT_CONFIGURED_MESSAGE,
+            },
         )
-    except Exception as exc:  # pragma: no cover - GCP errors surface here
+    except Exception:  # pragma: no cover - GCP errors surface here
         logger.exception("schedule_status failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_INTERNAL_MESSAGE},
         )
 
 
@@ -104,21 +110,24 @@ def schedule_sync() -> ScheduleSyncResponse:
             cron=cron,
             time_zone=tz,
         )
-    except CloudSchedulerNotConfigured as exc:
+    except CloudSchedulerNotConfigured:
         raise HTTPException(
             status_code=503,
-            detail={"error": "scheduler_not_configured", "message": str(exc)},
+            detail={
+                "error": "scheduler_not_configured",
+                "message": _SCHEDULER_NOT_CONFIGURED_MESSAGE,
+            },
         )
-    except CloudSchedulerError as exc:
+    except CloudSchedulerError:
         raise HTTPException(
             status_code=502,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_UPSTREAM_MESSAGE},
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("schedule_sync failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_INTERNAL_MESSAGE},
         )
 
 
@@ -131,16 +140,19 @@ def schedule_run_now() -> ScheduleActionResponse:
     try:
         _service().run_now()
         return ScheduleActionResponse(ok=True, message="Triggered")
-    except CloudSchedulerNotConfigured as exc:
+    except CloudSchedulerNotConfigured:
         raise HTTPException(
             status_code=503,
-            detail={"error": "scheduler_not_configured", "message": str(exc)},
+            detail={
+                "error": "scheduler_not_configured",
+                "message": _SCHEDULER_NOT_CONFIGURED_MESSAGE,
+            },
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("schedule_run_now failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_INTERNAL_MESSAGE},
         )
 
 
@@ -153,16 +165,19 @@ def schedule_pause() -> ScheduleActionResponse:
     try:
         result = _service().pause()
         return ScheduleActionResponse(ok=True, job=_to_status({**result, "exists": True}))
-    except CloudSchedulerNotConfigured as exc:
+    except CloudSchedulerNotConfigured:
         raise HTTPException(
             status_code=503,
-            detail={"error": "scheduler_not_configured", "message": str(exc)},
+            detail={
+                "error": "scheduler_not_configured",
+                "message": _SCHEDULER_NOT_CONFIGURED_MESSAGE,
+            },
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("schedule_pause failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_INTERNAL_MESSAGE},
         )
 
 
@@ -175,14 +190,17 @@ def schedule_resume() -> ScheduleActionResponse:
     try:
         result = _service().resume()
         return ScheduleActionResponse(ok=True, job=_to_status({**result, "exists": True}))
-    except CloudSchedulerNotConfigured as exc:
+    except CloudSchedulerNotConfigured:
         raise HTTPException(
             status_code=503,
-            detail={"error": "scheduler_not_configured", "message": str(exc)},
+            detail={
+                "error": "scheduler_not_configured",
+                "message": _SCHEDULER_NOT_CONFIGURED_MESSAGE,
+            },
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("schedule_resume failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": "scheduler_error", "message": str(exc)},
+            detail={"error": "scheduler_error", "message": _SCHEDULER_INTERNAL_MESSAGE},
         )

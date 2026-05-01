@@ -114,6 +114,19 @@ def _detect_cloud_run_url() -> Optional[str]:
     return None
 
 
+def _configured_oidc_audience(default: str) -> str:
+    """Return the canonical Scheduler OIDC audience used by server.py too."""
+    multi = (os.getenv("OIDC_EXPECTED_AUDIENCES") or "").strip()
+    if multi:
+        first = next((part.strip() for part in multi.split(",") if part.strip()), "")
+        if first:
+            return first.rstrip("/")
+    single = (os.getenv("OIDC_EXPECTED_AUDIENCE") or "").strip()
+    if single:
+        return single.rstrip("/")
+    return default.rstrip("/")
+
+
 class CloudSchedulerService:
     """
     Manage the single daily-analysis Cloud Scheduler job for this service.
@@ -201,7 +214,7 @@ class CloudSchedulerService:
         from google.cloud import scheduler_v1  # type: ignore
 
         target_url = f"{self.cloud_run_url}{_DEFAULT_TARGET_PATH}"
-        oidc_audience = self.cloud_run_url
+        oidc_audience = _configured_oidc_audience(self.cloud_run_url)
 
         http_target = scheduler_v1.HttpTarget(
             uri=target_url,
