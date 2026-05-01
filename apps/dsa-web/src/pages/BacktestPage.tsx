@@ -144,17 +144,37 @@ const PerformanceCard: React.FC<{ metrics: PerformanceMetrics; title: string }> 
 
 // ============ Run Summary ============
 
-const RunSummary: React.FC<{ data: BacktestRunResponse }> = ({ data }) => (
-  <div className="backtest-summary animate-fade-in">
-    <span className="label">Processed: <span className="value">{data.processed}</span></span>
-    <span className="label">Saved: <span className="value primary">{data.saved}</span></span>
-    <span className="label">Completed: <span className="value success">{data.completed}</span></span>
-    <span className="label">Insufficient: <span className="value warning">{data.insufficient}</span></span>
-    {data.errors > 0 && (
-      <span className="label">Errors: <span className="value danger">{data.errors}</span></span>
-    )}
-  </div>
-);
+const RunSummary: React.FC<{ data: BacktestRunResponse; forceRerun: boolean }> = ({ data, forceRerun }) => {
+  // Common confusion: a fresh database / freshly-deployed service has no
+  // analyses old enough to evaluate, so every counter is 0 and the user
+  // thinks "nothing happened". Surface a loud hint instead of a silent row.
+  const totalActivity = data.processed + data.saved + data.completed + data.insufficient + data.errors;
+  if (totalActivity === 0) {
+    return (
+      <div className="backtest-summary animate-fade-in" role="status">
+        <span className="label" style={{ color: '#f59e0b', fontWeight: 600 }}>
+          ⚠️ 本次回测未评估任何记录（结果全为 0）
+        </span>
+        <span className="label" style={{ display: 'block', marginTop: 4 }}>
+          {forceRerun
+            ? '勾选了 force-rerun，但仍未找到符合 eval 窗口的记录。检查股票代码筛选 / 评估窗口天数。'
+            : '原因通常是：数据库里没有 ≥ 14 天前的分析记录（默认 BACKTEST_MIN_AGE_DAYS=14）。请等 scheduler 累积两周数据，或勾选下方「Force rerun」把 min_age_days 设为 0 验证链路。'}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="backtest-summary animate-fade-in">
+      <span className="label">Processed: <span className="value">{data.processed}</span></span>
+      <span className="label">Saved: <span className="value primary">{data.saved}</span></span>
+      <span className="label">Completed: <span className="value success">{data.completed}</span></span>
+      <span className="label">Insufficient: <span className="value warning">{data.insufficient}</span></span>
+      {data.errors > 0 && (
+        <span className="label">Errors: <span className="value danger">{data.errors}</span></span>
+      )}
+    </div>
+  );
+};
 
 // ============ Main Page ============
 
@@ -426,7 +446,7 @@ const BacktestPage: React.FC = () => {
         </div>
         {runResult && (
           <div className="mt-2 max-w-4xl">
-            <RunSummary data={runResult} />
+            <RunSummary data={runResult} forceRerun={forceRerun} />
           </div>
         )}
         {runError && (
