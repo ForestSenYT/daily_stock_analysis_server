@@ -88,12 +88,16 @@ class QuantResearchService:
             enabled=True,
             status="ready",
             message=(
-                "Quant Research Lab is live. Phase 2 — Factor Lab — is "
-                "operational: GET /api/v1/quant/factors lists built-in "
-                "factors, POST /api/v1/quant/factors/evaluate runs IC / "
-                "RankIC / quantile-return analysis. Strategy backtest, "
-                "portfolio optimization, AI factor generation, and Agent "
-                "integration are still pending in later phases."
+                "Quant Research Lab is live. Phase 2 (Factor Lab) and "
+                "Phase 3 (Research Backtest Lab) are operational: "
+                "GET /api/v1/quant/factors lists built-in factors, "
+                "POST /api/v1/quant/factors/evaluate runs IC/RankIC/"
+                "quantile-return analysis, POST /api/v1/quant/backtests/run "
+                "simulates factor strategies (top-k long-only / "
+                "quantile long-short / equal-weight baseline) with "
+                "Sharpe / Sortino / drawdown / turnover / IR metrics. "
+                "Portfolio optimization, AI factor generation, and "
+                "Agent integration are still pending in later phases."
             ),
             phase=_CURRENT_PHASE,
         )
@@ -124,20 +128,22 @@ class QuantResearchService:
             QuantResearchCapability(
                 name="strategy_backtest",
                 title="Strategy Backtest",
-                available=False,
+                available=True,
                 phase="phase-3",
                 description=(
-                    "Research-grade strategy backtest with explicit "
-                    "lookahead-bias guard. Supports factor top-k long-only, "
-                    "quantile long-short (simulated), benchmark compare. "
-                    "Distinct from /api/v1/backtest/* (which is the "
+                    "Research-grade strategy backtest with structural "
+                    "1-day signal lag (lookahead-bias guard). Supports "
+                    "factor top-k long-only, quantile long-short "
+                    "(simulated, no real shorting), equal-weight "
+                    "baseline, optional benchmark compare. Distinct "
+                    "from /api/v1/backtest/* (which is the "
                     "after-the-fact AI decision validator)."
                 ),
                 endpoints=[
                     "POST /api/v1/quant/backtests/run",
                     "GET  /api/v1/quant/backtests/{run_id}",
                 ],
-                requires_optional_deps=["vectorbt (optional)"],
+                requires_optional_deps=[],
             ),
             QuantResearchCapability(
                 name="portfolio_optimization",
