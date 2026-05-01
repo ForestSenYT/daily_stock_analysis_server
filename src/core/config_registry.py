@@ -59,6 +59,16 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
         "display_order": 60,
     },
     {
+        "category": "quant",
+        "title": "Quant Research Lab",
+        "description": (
+            "Research-grade quantitative module: factor library, "
+            "strategy backtest, portfolio optimization. Independent from "
+            "the AI-decision validation backtest under /api/v1/backtest/*."
+        ),
+        "display_order": 65,
+    },
+    {
         "category": "uncategorized",
         "title": "Uncategorized",
         "description": "Keys not mapped in the field registry.",
@@ -1583,6 +1593,29 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {"min": 0.0, "max": 100.0},
         "display_order": 50,
+    },
+    # ------------------------------------------------------------------
+    # Quant Research Lab — disabled-by-default research module
+    # ------------------------------------------------------------------
+    "QUANT_RESEARCH_ENABLED": {
+        "title": "Quant Research Lab",
+        "description": (
+            "Master switch for the research-grade Quant Research Lab "
+            "(factor library / strategy backtest / portfolio optimization). "
+            "Independent from the AI-decision validation backtest. "
+            "Disabled by default; all /api/v1/quant/* endpoints return "
+            "{\"enabled\": false} until this is flipped to true."
+        ),
+        "category": "quant",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 10,
     },
     "AGENT_MODE": {
         "title": "Agent Mode",

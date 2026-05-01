@@ -802,6 +802,13 @@ class Config:
     backtest_min_age_days: int = 14
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
+
+    # === Quant Research Lab 配置 ===
+    # 独立于 ``backtest_*`` 之外的"研究级"量化模块——因子库 / 策略回测 /
+    # 组合优化。默认关闭：所有 ``/api/v1/quant/*`` 接口在 disabled 状态下
+    # 返回 ``{"enabled": false, "status": "not_enabled"}``，不影响现有
+    # AI 决策回测（``/api/v1/backtest/*``）、Agent、分析主链路。
+    quant_research_enabled: bool = False
     
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -1480,6 +1487,7 @@ class Config:
                 field_name='BACKTEST_NEUTRAL_BAND_PCT',
                 minimum=0.0,
             ),
+            quant_research_enabled=os.getenv('QUANT_RESEARCH_ENABLED', 'false').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=parse_env_int(os.getenv('MAX_WORKERS'), 3, field_name='MAX_WORKERS', minimum=1),

@@ -1,0 +1,38 @@
+# ===================================
+# Quant Research Lab — optional dependencies
+# ===================================
+# This file is intentionally separate from `requirements.txt` so that
+# the base service stays lean (especially on Cloud Run where image size
+# matters). The Python packages listed here are ONLY needed when you
+# actually exercise advanced Quant Research Lab features (heavy
+# optimization, vectorized backtest engines, etc.).
+#
+# Install when (and only when) you want them:
+#     pip install -r requirements-quant.txt
+#
+# All `src/quant_research/*` code MUST start cleanly without any of these
+# being installed; reach for them via lazy `import ... ; except ImportError`
+# blocks and surface a structured "not_supported" error if the user invokes
+# a path that requires the missing dep.
+#
+# === Phase 1 (current scaffold) ===
+# Nothing required. The skeleton uses only stdlib + already-installed deps
+# (pandas, numpy, sqlalchemy, fastapi, pydantic).
+#
+# === Phase 2+ (commented; uncomment as you opt in) ===
+# Lightweight, well-maintained, MIT/BSD-style — these are reasonable
+# defaults if/when you ramp up to real research workloads:
+#
+# vectorbt>=0.27,<1            # Vectorised event-driven backtest engine
+# pandas-ta>=0.3.14b           # Pure-pandas technical indicators (no TA-Lib build)
+# riskfolio-lib>=6,<8          # Portfolio optimization & risk parity
+# PyPortfolioOpt>=1.5,<2       # Convex / Black-Litterman / HRP optimizers
+# cvxpy>=1.5,<2                # Convex solver (transitive of PyPortfolioOpt)
+# statsmodels>=0.14            # IC regression diagnostics
+# pyarrow>=15                  # Faster parquet IO if persisting large factor panels
+#
+# Heavy / specialized — only install if you actually have a use for them:
+#
+# qlib>=0.9                    # Microsoft Qlib platform (large)
+# alphalens-reloaded>=0.4      # Factor analysis tear sheets
+# empyrical-reloaded>=0.5      # Performance metrics

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [新功能] Quant Research Lab 基础设施落地：feature flag `QUANT_RESEARCH_ENABLED`（默认 false）、独立模块 `src/quant_research/`、API `/api/v1/quant/status` 与 `/api/v1/quant/capabilities`，与现有 `/api/v1/backtest/*` AI 决策回测语义完全分开。
+- [文档] 新增 `docs/quant-research-lab.md` 描述模块定位、与现有回测的边界、9 阶段路线图与安全保证。
+- [chore] 新增 `requirements-quant.txt` 作为可选量化依赖清单（默认不安装，不影响 Cloud Run 镜像体积）。
+- [测试] 新增 `tests/quant_research/test_basics.py` 覆盖 feature flag disabled 路径、不破坏 app import、capabilities 返回稳定结构。
 
 ## [3.14.2] - 2026-04-30
 

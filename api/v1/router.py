@@ -11,7 +11,7 @@ API v1 路由聚合
 
 from fastapi import APIRouter
 
-from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule
+from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research
 
 # 创建 v1 版本主路由
 router = APIRouter(prefix="/api/v1")
@@ -74,4 +74,14 @@ router.include_router(
     portfolio.router,
     prefix="/portfolio",
     tags=["Portfolio"]
+)
+
+# Quant Research Lab (research-grade factor / strategy / portfolio module)
+# — independent from /api/v1/backtest/* (which validates AI decisions
+# after the fact). All endpoints honor the QUANT_RESEARCH_ENABLED flag
+# and return structured `not_enabled` payloads when the flag is off.
+router.include_router(
+    quant_research.router,
+    prefix="/quant",
+    tags=["QuantResearch"]
 )
