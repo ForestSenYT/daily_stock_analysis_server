@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple, Callable, TypeVar
@@ -636,83 +637,114 @@ class DatabaseManager:
     
     _instance: Optional['DatabaseManager'] = None
     _initialized: bool = False
-    
+    # 单例创建 / 重试用锁，避免冷启动并发请求一起触发 __init__ 重入。
+    _singleton_lock: threading.RLock = threading.RLock()
+
     def __new__(cls, *args, **kwargs):
         """单例模式实现"""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        with cls._singleton_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
     
     def __init__(self, db_url: Optional[str] = None):
         """
         初始化数据库管理器
-        
+
         Args:
             db_url: 数据库连接 URL（可选，默认从配置读取）
+
+        失败语义：
+            如果初始化过程中（``create_engine`` / ``Base.metadata.create_all`` 等）
+            抛出异常，会清理已创建的 engine、把类级单例 ``_instance`` 重置为
+            None 并重新抛出。这样下一次 ``get_instance()`` 会从零重新构造，
+            避免出现"半初始化的单例把所有后续请求一锁到底"的故障形态
+            （在 Cloud Run + gcsfuse 冷启动 IO 抖动时被踩到过）。
         """
-        if getattr(self, '_initialized', False):
-            return
+        cls = type(self)
+        with cls._singleton_lock:
+            if getattr(self, '_initialized', False):
+                return
 
-        config = get_config()
-        if db_url is None:
-            db_url = config.get_db_url()
+            try:
+                config = get_config()
+                if db_url is None:
+                    db_url = config.get_db_url()
 
-        self._db_url = db_url
-        self._sqlite_wal_enabled = config.sqlite_wal_enabled
-        self._sqlite_busy_timeout_ms = config.sqlite_busy_timeout_ms
-        self._sqlite_write_retry_max = config.sqlite_write_retry_max
-        self._sqlite_write_retry_base_delay = config.sqlite_write_retry_base_delay
+                self._db_url = db_url
+                self._sqlite_wal_enabled = config.sqlite_wal_enabled
+                self._sqlite_busy_timeout_ms = config.sqlite_busy_timeout_ms
+                self._sqlite_write_retry_max = config.sqlite_write_retry_max
+                self._sqlite_write_retry_base_delay = config.sqlite_write_retry_base_delay
 
-        engine_kwargs = {
-            "echo": False,
-            "pool_pre_ping": True,
-        }
-        if str(db_url).startswith("sqlite:") and self._sqlite_busy_timeout_ms > 0:
-            engine_kwargs["connect_args"] = {
-                "timeout": self._sqlite_busy_timeout_ms / 1000,
-            }
+                engine_kwargs = {
+                    "echo": False,
+                    "pool_pre_ping": True,
+                }
+                if str(db_url).startswith("sqlite:") and self._sqlite_busy_timeout_ms > 0:
+                    engine_kwargs["connect_args"] = {
+                        "timeout": self._sqlite_busy_timeout_ms / 1000,
+                    }
 
-        # 创建数据库引擎
-        self._engine = create_engine(
-            db_url,
-            **engine_kwargs,
-        )
-        self._is_sqlite_engine = self._engine.url.get_backend_name() == 'sqlite'
-        self._sqlite_file_db = self._is_sqlite_engine and self._is_file_sqlite_database()
-        self._install_sqlite_pragma_handler()
-        
-        # 创建 Session 工厂
-        self._SessionLocal = sessionmaker(
-            bind=self._engine,
-            autocommit=False,
-            autoflush=False,
-        )
-        
-        # 创建所有表
-        Base.metadata.create_all(self._engine)
+                # 创建数据库引擎
+                self._engine = create_engine(
+                    db_url,
+                    **engine_kwargs,
+                )
+                self._is_sqlite_engine = self._engine.url.get_backend_name() == 'sqlite'
+                self._sqlite_file_db = self._is_sqlite_engine and self._is_file_sqlite_database()
+                self._install_sqlite_pragma_handler()
 
-        self._initialized = True
-        logger.info(f"数据库初始化完成: {db_url}")
+                # 创建 Session 工厂
+                self._SessionLocal = sessionmaker(
+                    bind=self._engine,
+                    autocommit=False,
+                    autoflush=False,
+                )
 
-        # 注册退出钩子，确保程序退出时关闭数据库连接
-        atexit.register(DatabaseManager._cleanup_engine, self._engine)
-    
+                # 创建所有表
+                Base.metadata.create_all(self._engine)
+
+                self._initialized = True
+                logger.info(f"数据库初始化完成: {db_url}")
+
+                # 注册退出钩子，确保程序退出时关闭数据库连接
+                atexit.register(DatabaseManager._cleanup_engine, self._engine)
+            except Exception as exc:
+                logger.error("DatabaseManager 初始化失败，将清理半坏单例以便重试: %s", exc)
+                # 清掉部分构造的 engine，避免连接 / 文件句柄泄漏
+                engine = getattr(self, '_engine', None)
+                if engine is not None:
+                    try:
+                        engine.dispose()
+                    except Exception:  # pragma: no cover - 防御
+                        pass
+                # 抹掉单例引用：下次 get_instance() / cls() 会触发全新一轮 __new__ + __init__
+                cls._instance = None
+                raise
+
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
-        """获取单例实例"""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-    
+        """获取单例实例
+
+        若上一次 ``__init__`` 失败，``_instance`` 已经被重置为 None，这里会
+        重新构造一次（gcsfuse warm-up 抖动等场景就是这么自愈的）。
+        """
+        with cls._singleton_lock:
+            if cls._instance is None or not getattr(cls._instance, '_initialized', False):
+                cls._instance = cls()
+            return cls._instance
+
     @classmethod
     def reset_instance(cls) -> None:
         """重置单例（用于测试）"""
-        if cls._instance is not None:
-            if hasattr(cls._instance, '_engine') and cls._instance._engine is not None:
-                cls._instance._engine.dispose()
-            cls._instance._initialized = False
-            cls._instance = None
+        with cls._singleton_lock:
+            if cls._instance is not None:
+                if hasattr(cls._instance, '_engine') and cls._instance._engine is not None:
+                    cls._instance._engine.dispose()
+                cls._instance._initialized = False
+                cls._instance = None
 
     @classmethod
     def _cleanup_engine(cls, engine) -> None:
