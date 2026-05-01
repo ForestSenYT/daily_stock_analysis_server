@@ -386,13 +386,85 @@ app.add_middleware(
 
 
 # ============================================================
-# 鉴权依赖：API_TOKEN 为空时跳过校验
+# 鉴权依赖：API_TOKEN 静态串 + Google OIDC ID-token 双通道
 # ============================================================
+#
+# 这个 dependency 同时接受两种 ``Authorization: Bearer <...>`` 凭据：
+# 1. 静态 ``API_TOKEN`` 环境变量字面值（人手工 curl / 客户端用）。
+# 2. Google 签发的 OIDC ID token，且 token 的 ``email`` 在允许调用者列表
+#    （默认就是本服务的运行时 SA），``aud`` 必须是本服务的 Cloud Run URL。
+#    这条通道是给 GCP Cloud Scheduler 走的：scheduler 的 HTTP 目标可以
+#    挂 ``OidcToken``，Google 自动签发并轮换，省掉手动维护静态 token 的
+#    管理负担。
+#
+# 行为：
+# - 两种通道任一通过即放行；都失败时返回 401。
+# - 若 ``API_TOKEN`` 未配置且 ``SCHEDULER_INVOKER_SA`` 也没设：完全
+#   跳过校验（本地 / dev 模式），保持向后兼容。
+
+def _allowed_oidc_invokers() -> list[str]:
+    """OIDC token 的 email 必须在这个列表里。
+    默认包含本服务的运行时 SA（从 metadata server 自动拿）。
+    可以通过 ``SCHEDULER_INVOKER_SA``（逗号分隔）追加额外允许的 SA。
+    """
+    allowed: list[str] = []
+    extra = (os.environ.get("SCHEDULER_INVOKER_SA") or "").strip()
+    if extra:
+        allowed.extend(s.strip() for s in extra.split(",") if s.strip())
+    # 自动加上当前 Cloud Run 进程的 runtime SA
+    try:
+        from src.services.cloud_scheduler_service import _detect_runtime_sa  # noqa: WPS433
+        runtime_sa = _detect_runtime_sa()
+        if runtime_sa and runtime_sa not in allowed:
+            allowed.append(runtime_sa)
+    except Exception:
+        pass
+    return allowed
+
+
+def _try_verify_oidc_token(token: str) -> Optional[str]:
+    """Validate a Google-signed OIDC ID token. Returns the verified email
+    (caller identity) on success, or None on any failure."""
+    try:
+        from google.auth.transport import requests as g_requests  # type: ignore
+        from google.oauth2 import id_token as g_id_token  # type: ignore
+    except ImportError:
+        return None
+
+    try:
+        # audience can be the canonical Cloud Run service URL or any value
+        # Cloud Scheduler put in the OidcToken.audience field.
+        from src.services.cloud_scheduler_service import _detect_cloud_run_url
+        expected_audience = (
+            os.environ.get("OIDC_EXPECTED_AUDIENCE")
+            or _detect_cloud_run_url()
+        )
+        if not expected_audience:
+            return None
+        info = g_id_token.verify_oauth2_token(
+            token,
+            g_requests.Request(),
+            audience=expected_audience,
+        )
+        email = (info.get("email") or "").strip()
+        if not email:
+            return None
+        if email not in _allowed_oidc_invokers():
+            logger.warning("OIDC caller %s not in allowed invoker list", email)
+            return None
+        return email
+    except Exception as exc:
+        logger.debug("OIDC verify failed: %s", exc)
+        return None
+
 
 def _require_api_token(request: Request) -> None:
-    expected = (os.environ.get("API_TOKEN") or "").strip()
-    if not expected:
-        return  # 未配置 token：本地/开发模式直接放行
+    static_token = (os.environ.get("API_TOKEN") or "").strip()
+    invoker_allowlist = _allowed_oidc_invokers()
+
+    # Wide-open dev mode: nothing configured at all.
+    if not static_token and not invoker_allowlist:
+        return
 
     auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
     if not auth_header:
@@ -403,12 +475,31 @@ def _require_api_token(request: Request) -> None:
         )
 
     parts = auth_header.split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1].strip() != expected:
+    if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "unauthorized", "message": "Invalid bearer token"},
+            detail={"error": "unauthorized", "message": "Invalid Authorization header"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    presented = parts[1].strip()
+
+    # 1) Static API_TOKEN match (manual / client-script callers)
+    if static_token and presented == static_token:
+        return
+
+    # 2) OIDC ID token (Cloud Scheduler / cron callers)
+    if invoker_allowlist:
+        verified_email = _try_verify_oidc_token(presented)
+        if verified_email is not None:
+            request.state.oidc_invoker = verified_email
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"error": "unauthorized", "message": "Invalid bearer token"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 # ============================================================

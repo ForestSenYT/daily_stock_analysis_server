@@ -38,6 +38,7 @@ from src.core.config_registry import (
     get_category_definitions,
     get_field_definition,
     get_registered_field_keys,
+    is_field_visible_in_runtime,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,11 @@ class SystemConfigService:
 
         items: List[Dict[str, Any]] = []
         for key in all_keys:
+            # Hide cloud-run-incompatible registry fields when running on Cloud Run
+            # (auto-detected via K_SERVICE). Keeps the value list consistent
+            # with the schema response.
+            if not is_field_visible_in_runtime(key):
+                continue
             raw_value = config_map.get(key, "")
             field_schema = schema_by_key[key]
             item: Dict[str, Any] = {

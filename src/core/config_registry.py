@@ -7,6 +7,7 @@ validation hints, and category grouping.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
@@ -1298,8 +1299,8 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "display_order": 61,
     },
     "SCHEDULE_TIME": {
-        "title": "Schedule Time",
-        "description": "Daily schedule time in HH:MM format.",
+        "title": "Schedule Time (HH:MM)",
+        "description": "Daily schedule time in HH:MM format. Used by `python main.py --schedule` self-host mode and as the simple-mode default for the Cloud Scheduler card.",
         "category": "system",
         "data_type": "time",
         "ui_control": "time",
@@ -1310,6 +1311,34 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {"pattern": r"^([01]\d|2[0-3]):[0-5]\d$"},
         "display_order": 10,
+    },
+    "SCHEDULE_CRON": {
+        "title": "Schedule Cron",
+        "description": "5-field cron expression. Source-of-truth for Cloud Scheduler integration. Default `0 6 * * 2-6` = 06:00 Tue-Sat.",
+        "category": "system",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "0 6 * * 2-6",
+        "options": [],
+        "validation": {"pattern": r"^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*$"},
+        "display_order": 12,
+    },
+    "SCHEDULE_TIMEZONE": {
+        "title": "Schedule Timezone",
+        "description": "IANA timezone for the schedule cron, e.g. `Asia/Shanghai`, `America/New_York`, `UTC`.",
+        "category": "system",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "Asia/Shanghai",
+        "options": [],
+        "validation": {},
+        "display_order": 13,
     },
     "HTTP_PROXY": {
         "title": "HTTP Proxy",
@@ -1355,7 +1384,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "RUN_IMMEDIATELY": {
         "title": "Run Immediately",
-        "description": "Whether to run analysis immediately on startup (non-schedule mode).",
+        "description": "Whether to run analysis immediately on startup (non-schedule mode). Only applies to `python main.py` self-host mode.",
         "category": "system",
         "data_type": "boolean",
         "ui_control": "switch",
@@ -1366,6 +1395,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {},
         "display_order": 45,
+        "cloud_run_compatible": False,
     },
     "SCHEDULE_ENABLED": {
         "title": "Schedule Enabled",
@@ -1383,7 +1413,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "SCHEDULE_RUN_IMMEDIATELY": {
         "title": "Schedule Run Immediately",
-        "description": "Whether to run one analysis immediately on startup in schedule mode.",
+        "description": "Whether to run one analysis immediately on startup in schedule mode. Only applies to `python main.py --schedule` self-host mode.",
         "category": "system",
         "data_type": "boolean",
         "ui_control": "switch",
@@ -1394,6 +1424,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {},
         "display_order": 11,
+        "cloud_run_compatible": False,
     },
     "TRADING_DAY_CHECK_ENABLED": {
         "title": "Trading Day Check",
@@ -1758,7 +1789,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "AGENT_EVENT_MONITOR_ENABLED": {
         "title": "Event Monitor",
-        "description": "Enable background Event Monitor polling in schedule mode.",
+        "description": "Enable background Event Monitor polling in schedule mode. Only active under `python main.py --schedule` self-host mode.",
         "category": "agent",
         "data_type": "boolean",
         "ui_control": "switch",
@@ -1769,10 +1800,11 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {},
         "display_order": 69,
+        "cloud_run_compatible": False,
     },
     "AGENT_EVENT_MONITOR_INTERVAL_MINUTES": {
         "title": "Event Monitor Interval",
-        "description": "Polling interval, in minutes, for background Event Monitor checks.",
+        "description": "Polling interval, in minutes, for background Event Monitor checks. Only active under `python main.py --schedule` self-host mode.",
         "category": "agent",
         "data_type": "integer",
         "ui_control": "number",
@@ -1783,10 +1815,11 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {"min": 1, "max": 1440},
         "display_order": 70,
+        "cloud_run_compatible": False,
     },
     "AGENT_EVENT_ALERT_RULES_JSON": {
         "title": "Event Alert Rules",
-        "description": "JSON array of Event Monitor rules loaded by schedule mode for background alert polling.",
+        "description": "JSON array of Event Monitor rules loaded by schedule mode for background alert polling. Only active under `python main.py --schedule` self-host mode.",
         "category": "agent",
         "data_type": "json",
         "ui_control": "textarea",
@@ -1797,6 +1830,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {},
         "display_order": 71,
+        "cloud_run_compatible": False,
     },
 }
 
@@ -1858,13 +1892,54 @@ def get_field_definition(key: str, value_hint: Optional[str] = None) -> Dict[str
     return field
 
 
+def is_cloud_run_runtime() -> bool:
+    """Detect Cloud Run runtime environment.
+
+    Cloud Run auto-injects ``K_SERVICE`` for every revision; if it's set
+    we're inside Cloud Run (or Cloud Functions gen2). Self-hosted Docker /
+    bare-metal runs leave it unset, in which case the ``cloud_run_compatible``
+    schema flag is a no-op so legacy users see no behavior change.
+
+    Override with ``DSA_FORCE_CLOUD_RUN`` for testing.
+    """
+    raw = os.getenv("DSA_FORCE_CLOUD_RUN")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(os.getenv("K_SERVICE"))
+
+
+def is_field_visible_in_runtime(key: str) -> bool:
+    """Whether a given registry key should be exposed in the current runtime.
+
+    Looks at the optional ``cloud_run_compatible`` flag on the field
+    definition; defaults to True (visible). When running on Cloud Run AND
+    the flag is False, the field is hidden.
+    """
+    field = _FIELD_DEFINITIONS.get(key.upper())
+    if not isinstance(field, dict):
+        return True
+    if field.get("cloud_run_compatible", True):
+        return True
+    return not is_cloud_run_runtime()
+
+
 def build_schema_response() -> Dict[str, Any]:
-    """Build schema payload grouped by category."""
+    """Build schema payload grouped by category.
+
+    Fields marked ``cloud_run_compatible: False`` are filtered out when the
+    process is running on Cloud Run (auto-detected via ``K_SERVICE``) so the
+    WebUI doesn't surface settings that have no effect in that topology.
+    Self-hosted users (no ``K_SERVICE``) see the full schema unchanged.
+    """
     category_map: Dict[str, Dict[str, Any]] = {}
     for category in get_category_definitions():
         category_map[category["category"]] = {**category, "fields": []}
 
+    cloud_run = is_cloud_run_runtime()
     for key in sorted(_FIELD_DEFINITIONS.keys()):
+        defn = _FIELD_DEFINITIONS.get(key) or {}
+        if cloud_run and not defn.get("cloud_run_compatible", True):
+            continue
         field = get_field_definition(key)
         category_map[field["category"]]["fields"].append(field)
 

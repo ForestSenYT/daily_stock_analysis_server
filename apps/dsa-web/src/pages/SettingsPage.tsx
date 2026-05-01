@@ -9,6 +9,7 @@ import {
   ChangePasswordCard,
   IntelligentImport,
   LLMChannelEditor,
+  ScheduleCloudCard,
   SettingsCategoryNav,
   SettingsAlert,
   SettingsField,
@@ -476,6 +477,21 @@ const SettingsPage: React.FC = () => {
 
           <section className="space-y-4">
             {activeCategory === 'system' ? <AuthSettingsCard /> : null}
+            {activeCategory === 'system' ? (
+              <ScheduleCloudCard
+                cron={String(rawActiveItemMap.get('SCHEDULE_CRON') ?? '0 6 * * 2-6')}
+                timezone={String(rawActiveItemMap.get('SCHEDULE_TIMEZONE') ?? 'Asia/Shanghai')}
+                enabled={(rawActiveItemMap.get('SCHEDULE_ENABLED') ?? 'false').toLowerCase() === 'true'}
+                onChange={(next) => {
+                  if (next.cron !== undefined) {
+                    setDraftValue('SCHEDULE_CRON', next.cron);
+                  }
+                  if (next.timezone !== undefined) {
+                    setDraftValue('SCHEDULE_TIMEZONE', next.timezone);
+                  }
+                }}
+              />
+            ) : null}
             {activeCategory === 'system' ? (
               <SettingsSectionCard
                 title="版本信息"

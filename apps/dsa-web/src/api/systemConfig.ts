@@ -194,3 +194,70 @@ export const systemConfigApi = {
     }
   },
 };
+
+// =====================================================================
+// Cloud Scheduler integration (managed daily-analysis cron)
+// =====================================================================
+
+export interface ScheduleStatus {
+  exists: boolean;
+  jobName?: string | null;
+  schedule?: string | null;
+  timeZone?: string | null;
+  state?: string | null;
+  lastAttemptTime?: string | null;
+  nextRunTime?: string | null;
+  userUpdateTime?: string | null;
+  projectId?: string | null;
+  region?: string | null;
+}
+
+export interface ScheduleSyncResult {
+  ok: boolean;
+  job: ScheduleStatus;
+  cron: string;
+  timeZone: string;
+}
+
+export interface ScheduleActionResult {
+  ok: boolean;
+  job?: ScheduleStatus | null;
+  message?: string | null;
+}
+
+export const scheduleApi = {
+  async getStatus(): Promise<ScheduleStatus> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/system/schedule/status',
+    );
+    return toCamelCase<ScheduleStatus>(response.data);
+  },
+
+  async sync(): Promise<ScheduleSyncResult> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/system/schedule/sync',
+    );
+    return toCamelCase<ScheduleSyncResult>(response.data);
+  },
+
+  async runNow(): Promise<ScheduleActionResult> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/system/schedule/run-now',
+    );
+    return toCamelCase<ScheduleActionResult>(response.data);
+  },
+
+  async pause(): Promise<ScheduleActionResult> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/system/schedule/pause',
+    );
+    return toCamelCase<ScheduleActionResult>(response.data);
+  },
+
+  async resume(): Promise<ScheduleActionResult> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/system/schedule/resume',
+    );
+    return toCamelCase<ScheduleActionResult>(response.data);
+  },
+};

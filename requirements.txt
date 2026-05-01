@@ -68,3 +68,7 @@ uvicorn[standard]>=0.27.0   # ASGI 服务器
 pydantic>=2.5.0             # FastAPI 校验层（Cloud Run server.py 显式依赖）
 python-multipart>=0.0.6     # FastAPI File/Form upload support
 itsdangerous>=2.1.0         # SessionMiddleware 签名 cookie 所需（Web UI 管理员登录）
+
+# Google Cloud (Cloud Scheduler integration + OIDC token verification on /analyze)
+google-cloud-scheduler>=2.13,<3   # Cloud Scheduler client (managed cron for daily analysis)
+google-auth>=2.28               # OIDC ID-token verification (server.py /analyze)
