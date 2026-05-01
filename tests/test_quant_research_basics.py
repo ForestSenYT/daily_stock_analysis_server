@@ -58,7 +58,11 @@ class QuantResearchServiceDisabledFlagTests(unittest.TestCase):
 
         self.assertTrue(result.enabled)
         self.assertEqual(result.status, "ready")
-        self.assertIn("Phase 1", result.message)
+        # Message advertises which phase is live; current is Phase 2.
+        self.assertTrue(
+            "Phase" in result.message or "phase" in result.message.lower(),
+            msg=f"status message should mention current phase: {result.message!r}",
+        )
 
     def test_capabilities_lists_planned_features_regardless_of_flag(self) -> None:
         # The capability inventory is the same shape on/off; only the
@@ -72,16 +76,27 @@ class QuantResearchServiceDisabledFlagTests(unittest.TestCase):
                 self.assertEqual(caps.enabled, flag)
                 self.assertGreaterEqual(len(caps.capabilities), 5)
 
-    def test_capabilities_phase_1_has_no_available_features(self) -> None:
-        # Important contract: this build is scaffold-only; nothing should
-        # claim ``available=True`` yet.
+    def test_capabilities_only_implemented_phases_are_available(self) -> None:
+        # Each phase flips its capability's ``available`` flag to True
+        # only when the implementation lands. This test pins the
+        # expected per-phase availability so future phases can't
+        # accidentally claim availability before they're done.
         service = QuantResearchService(config=_fake_config(True))
         caps = service.capabilities()
+        # Phases that are live in this build:
+        live_phases = {"phase-2"}
         for cap in caps.capabilities:
-            self.assertFalse(
-                cap.available,
-                msg=f"Phase 1 must not advertise available={cap.available} for {cap.name}",
-            )
+            with self.subTest(capability=cap.name, phase=cap.phase):
+                expected = cap.phase in live_phases
+                self.assertEqual(
+                    cap.available,
+                    expected,
+                    msg=(
+                        f"Capability {cap.name} (phase={cap.phase}) availability "
+                        f"= {cap.available}; expected {expected} based on "
+                        f"live_phases={live_phases}."
+                    ),
+                )
 
     def test_capability_names_are_unique(self) -> None:
         service = QuantResearchService(config=_fake_config(True))

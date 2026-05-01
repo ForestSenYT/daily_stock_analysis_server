@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 1 — scaffold only** (this build).
+> Status: **Phase 2 — Factor Lab** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -76,12 +76,112 @@ placeholder cards.
 Cheap `{"ok": true}` ping so deploy verification can confirm the router
 is mounted without exercising service logic.
 
+### `GET /api/v1/quant/factors` *(Phase 2)*
+
+Lists the built-in factor catalog. Response:
+```json
+{
+  "enabled": true,
+  "builtins": [
+    {"id":"return_1d","name":"1-Day Return","description":"...",
+     "expected_direction":"unknown","lookback_days":2},
+    {"id":"ma_ratio_5_20","name":"MA Ratio 5/20","description":"...",
+     "expected_direction":"positive","lookback_days":21},
+    ...
+  ]
+}
+```
+
+Built-in factors (Phase 2): `return_1d`, `return_5d`, `ma_ratio_5_20`,
+`volatility_20`, `volume_zscore_20`, `rsi_14`, `macd_histogram`,
+`turnover_or_volume_proxy`. All implemented with pure pandas/numpy —
+no optional deps required.
+
+### `POST /api/v1/quant/factors/evaluate` *(Phase 2)*
+
+Run a cross-sectional factor evaluation on a stock pool.
+
+Request body (`FactorEvaluationRequest`):
+```json
+{
+  "factor": {
+    "name": "MA Ratio short-vs-long",
+    "builtin_id": "ma_ratio_5_20"
+  },
+  "stocks": ["NVDA", "AAPL", "MSFT", "AMD", "GOOG", "META", "AMZN", "TSLA"],
+  "start_date": "2026-01-01",
+  "end_date": "2026-04-30",
+  "forward_window": 5,
+  "quantile_count": 5
+}
+```
+
+Either `builtin_id` or `expression` must be set (not both).
+`expression` is parsed by the AST whitelist evaluator
+(`src/quant_research/factors/safe_expression.py`):
+allowed = OHLCV column references (`open / high / low / close / volume /
+amount / pct_chg / ma5 / ma10 / ma20 / volume_ratio`) + 12 helper
+functions (`mean / std / lag / shift / diff / pct_change / zscore / log /
+abs / max / min / div`). `eval` / `exec` / `__import__` / attribute
+access / dunder names are unconditionally rejected.
+
+Response (`FactorEvaluationResult`):
+```json
+{
+  "enabled": true,
+  "run_id": "abc...",
+  "factor": {...},
+  "factor_kind": "builtin",
+  "stock_pool": [...],
+  "start_date": "2026-01-01",
+  "end_date": "2026-04-30",
+  "forward_window": 5,
+  "quantile_count": 5,
+  "coverage": {
+    "requested_stocks":[...], "covered_stocks":[...],
+    "missing_stocks":[...], "requested_days": 86,
+    "total_observations": 642, "missing_observations": 22,
+    "missing_rate": 0.034
+  },
+  "metrics": {
+    "ic": [...], "rank_ic": [...],
+    "ic_mean": 0.041, "ic_std": 0.18, "icir": 0.227,
+    "rank_ic_mean": 0.038,
+    "quantile_count": 5,
+    "quantile_returns": {"1": -0.012, "2": -0.005, "3": 0.001,
+                          "4": 0.008, "5": 0.014},
+    "long_short_spread": 0.026,
+    "factor_turnover": 0.31,
+    "autocorrelation": 0.62,
+    "daily_ic_count": 86, "daily_rank_ic_count": 86
+  },
+  "diagnostics": [...],
+  "assumptions": {
+    "lookback_buffer_days": 21,
+    "min_stocks_per_day_for_ic": 5,
+    "no_lookahead": true,
+    "evaluator_version": "phase-2",
+    "evaluated_at": "2026-05-01T12:00:00+00:00"
+  }
+}
+```
+
+**Hard limits**: `stocks ≤ 50`, `(end - start) ≤ 365 days`,
+`forward_window ≤ 60`, `quantile_count ∈ [2, 10]`. Endpoint returns
+400 on violation.
+
+**No look-ahead invariant**: factor signal at date *t* is computed
+using only rows ≤ *t*; forward return at *t* is `close[t+window]/close[t]
+- 1` paired exclusively with the *t*-stamped factor value. The
+`assumptions.no_lookahead` flag is part of the response contract — if a
+future implementation breaks it, this flag must flip.
+
 ## Roadmap
 
 | Phase | Feature | Status |
 | --- | --- | --- |
-| **P1** | Scaffold + feature flag + status / capabilities endpoints | ✅ this build |
-| P2 | Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator | planned |
+| P1 | Scaffold + feature flag + status / capabilities endpoints | ✅ shipped |
+| **P2** | **Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator** | ✅ this build |
 | P3 | Research backtest engine (top-k long-only, simulated long-short), Sharpe / Sortino / drawdown / turnover | planned |
 | P4 | Portfolio optimizer (equal-weight, inverse-vol, max-Sharpe), VaR / CVaR | planned |
 | P5 | AI FactorSpec generation — LLM emits validated JSON only, never Python code | planned |

@@ -19,10 +19,22 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from datetime import date
+
 from src.config import Config, get_config
-from src.quant_research.errors import QuantResearchDisabledError  # noqa: F401  (re-exported for callers)
+from src.quant_research.errors import (  # noqa: F401  (re-exported for callers)
+    QuantResearchDisabledError,
+    QuantResearchValidationError,
+)
 from src.quant_research.repositories import QuantResearchRepository
 from src.quant_research.schemas import (
+    FactorCoverageReport,
+    FactorEvaluationRequest,
+    FactorEvaluationResult,
+    FactorInputSchema,
+    FactorMetricSummary,
+    FactorRegistryResponse,
+    FactorSpec,
     QuantResearchCapabilities,
     QuantResearchCapability,
     QuantResearchStatus,
@@ -31,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-1-scaffold"
+_CURRENT_PHASE = "phase-2-factor-lab"
 
 
 class QuantResearchService:
@@ -76,10 +88,12 @@ class QuantResearchService:
             enabled=True,
             status="ready",
             message=(
-                "Quant Research Lab feature flag is on, but only the "
-                "Phase 1 scaffold is live in this build. Factor "
-                "evaluation, backtest and portfolio optimization will "
-                "be added in subsequent phases."
+                "Quant Research Lab is live. Phase 2 — Factor Lab — is "
+                "operational: GET /api/v1/quant/factors lists built-in "
+                "factors, POST /api/v1/quant/factors/evaluate runs IC / "
+                "RankIC / quantile-return analysis. Strategy backtest, "
+                "portfolio optimization, AI factor generation, and Agent "
+                "integration are still pending in later phases."
             ),
             phase=_CURRENT_PHASE,
         )
@@ -94,7 +108,7 @@ class QuantResearchService:
             QuantResearchCapability(
                 name="factor_evaluation",
                 title="Factor Evaluation",
-                available=False,
+                available=True,
                 phase="phase-2",
                 description=(
                     "Evaluate built-in or AI-generated factors on a stock "
@@ -179,4 +193,132 @@ class QuantResearchService:
         return QuantResearchCapabilities(
             enabled=self.enabled,
             capabilities=capabilities,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Factor Lab
+    # ------------------------------------------------------------------
+
+    def list_factors(self) -> FactorRegistryResponse:
+        """Inventory of built-in factors available for evaluation.
+
+        Returns an ``enabled=False`` empty list when the master flag is
+        off so the WebUI can render the page even with the lab disabled.
+        """
+        from src.quant_research.factors.registry import list_builtin_factors
+
+        if not self.enabled:
+            return FactorRegistryResponse(enabled=False, builtins=[])
+        builtins = [
+            FactorInputSchema(
+                id=entry.id,
+                name=entry.name,
+                description=entry.description,
+                expected_direction=entry.expected_direction,
+                lookback_days=entry.lookback_days,
+            )
+            for entry in list_builtin_factors()
+        ]
+        return FactorRegistryResponse(enabled=True, builtins=builtins)
+
+    def evaluate_factor(self, request: FactorEvaluationRequest) -> FactorEvaluationResult:
+        """Run cross-sectional evaluation on the requested stock pool.
+
+        Validation responsibility: this method enforces field combinations
+        (mutual-exclusivity of builtin_id / expression, parseable dates,
+        list lengths) and delegates compute to
+        ``factors.evaluator.evaluate_factor``.
+
+        Raises ``QuantResearchDisabledError`` when the master flag is off
+        — the endpoint translates that into a structured 503-style payload.
+        """
+        if not self.enabled:
+            raise QuantResearchDisabledError(
+                "Quant Research Lab is disabled. "
+                "Set QUANT_RESEARCH_ENABLED=true to enable it."
+            )
+
+        from src.quant_research.factors.evaluator import (
+            FactorEvalInputs,
+            MAX_FORWARD_WINDOW,
+            MAX_LOOKBACK_DAYS,
+            MAX_STOCKS,
+            evaluate_factor as _run,
+        )
+
+        spec = request.factor
+        if bool(spec.builtin_id) == bool(spec.expression):
+            raise QuantResearchValidationError(
+                "Provide exactly one of `factor.builtin_id` or `factor.expression`.",
+                field="factor",
+            )
+
+        # Date parsing — Pydantic's ``date`` would also work but we
+        # keep the request schema as ``str`` so OpenAPI is unambiguous.
+        try:
+            start = date.fromisoformat(request.start_date)
+            end = date.fromisoformat(request.end_date)
+        except ValueError as exc:
+            raise QuantResearchValidationError(
+                f"Invalid date format (use YYYY-MM-DD): {exc}",
+                field="start_date/end_date",
+            )
+        if start > end:
+            raise QuantResearchValidationError(
+                "start_date must be on or before end_date.",
+                field="start_date",
+            )
+        if (end - start).days > MAX_LOOKBACK_DAYS:
+            raise QuantResearchValidationError(
+                f"Window too large: max {MAX_LOOKBACK_DAYS} calendar days.",
+                field="start_date/end_date",
+            )
+        if request.forward_window > MAX_FORWARD_WINDOW:
+            raise QuantResearchValidationError(
+                f"forward_window must be ≤ {MAX_FORWARD_WINDOW}.",
+                field="forward_window",
+            )
+        if len(request.stocks) > MAX_STOCKS:
+            raise QuantResearchValidationError(
+                f"Too many stocks: max {MAX_STOCKS}.",
+                field="stocks",
+            )
+
+        try:
+            outputs = _run(
+                FactorEvalInputs(
+                    builtin_id=spec.builtin_id,
+                    expression=spec.expression,
+                    factor_name=spec.name,
+                    stocks=list(request.stocks),
+                    start_date=start,
+                    end_date=end,
+                    forward_window=request.forward_window,
+                    quantile_count=request.quantile_count,
+                )
+            )
+        except ValueError as exc:
+            # Evaluator raises ValueError on bad factor inputs (unknown
+            # builtin id, mutually-exclusive flags). Surface as 400.
+            raise QuantResearchValidationError(str(exc), field="factor") from exc
+
+        # Map evaluator output → API schema.
+        return FactorEvaluationResult(
+            enabled=True,
+            run_id=outputs.run_id,
+            factor=FactorSpec(
+                name=outputs.factor_name,
+                builtin_id=outputs.factor_id,
+                expression=outputs.expression,
+            ),
+            factor_kind=outputs.factor_kind,
+            stock_pool=outputs.stock_pool,
+            start_date=outputs.start_date.isoformat(),
+            end_date=outputs.end_date.isoformat(),
+            forward_window=outputs.forward_window,
+            quantile_count=outputs.quantile_count,
+            coverage=FactorCoverageReport(**outputs.coverage),  # type: ignore[arg-type]
+            metrics=FactorMetricSummary(**outputs.metrics),  # type: ignore[arg-type]
+            diagnostics=outputs.diagnostics,
+            assumptions=outputs.assumptions,
         )

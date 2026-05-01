@@ -22,8 +22,15 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 
-from src.quant_research.errors import QuantResearchError
+from src.quant_research.errors import (
+    QuantResearchDisabledError,
+    QuantResearchError,
+    QuantResearchValidationError,
+)
 from src.quant_research.schemas import (
+    FactorEvaluationRequest,
+    FactorEvaluationResult,
+    FactorRegistryResponse,
     QuantResearchCapabilities,
     QuantResearchStatus,
 )
@@ -96,4 +103,81 @@ def quant_capabilities() -> QuantResearchCapabilities:
     ),
 )
 def quant_healthcheck() -> Dict[str, Any]:
-    return {"ok": True, "module": "quant_research", "phase": "phase-1-scaffold"}
+    return {"ok": True, "module": "quant_research", "phase": "phase-2-factor-lab"}
+
+
+# =====================================================================
+# Phase 2 — Factor Lab
+# =====================================================================
+
+@router.get(
+    "/factors",
+    response_model=FactorRegistryResponse,
+    summary="List built-in factors available for evaluation",
+    description=(
+        "Returns the registry of built-in factors (id, name, "
+        "description, expected direction, lookback days). When the "
+        "feature flag is off the response is "
+        "``{enabled: false, builtins: []}`` — never 5xx."
+    ),
+)
+def quant_list_factors() -> FactorRegistryResponse:
+    try:
+        return _service().list_factors()
+    except QuantResearchError as exc:
+        logger.warning("Quant Research list_factors error: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "quant_research_error", "message": str(exc)},
+        )
+
+
+@router.post(
+    "/factors/evaluate",
+    response_model=FactorEvaluationResult,
+    summary="Evaluate a factor on a stock pool",
+    description=(
+        "Run cross-sectional factor evaluation: IC / RankIC / ICIR, "
+        "quantile mean returns, long-short spread, factor turnover, "
+        "lag-1 autocorrelation. Pass either ``factor.builtin_id`` "
+        "(see ``GET /factors``) or ``factor.expression`` (free-form, "
+        "AST-whitelist-validated) — never both. ``stocks`` capped at "
+        "50, ``forward_window`` ≤ 60 days, date range ≤ 365 days. "
+        "All returned metrics are computed without look-ahead: factor "
+        "signal at date *t* uses only data up to *t*; forward return "
+        "uses *t+window*."
+    ),
+    responses={
+        200: {"description": "Evaluation finished (may include diagnostics for partial coverage)"},
+        400: {"description": "Validation error (bad factor / dates / pool)"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_evaluate_factor(request: FactorEvaluationRequest) -> FactorEvaluationResult:
+    try:
+        return _service().evaluate_factor(request)
+    except QuantResearchDisabledError as exc:
+        # Disabled flag — surface as a structured 503 so SPA can render
+        # the "enable in settings" hint instead of a generic error.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": str(exc),
+            },
+        )
+    except QuantResearchValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": str(exc),
+                "field": exc.field,
+            },
+        )
+    except QuantResearchError as exc:
+        logger.exception("Quant Research evaluate_factor failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": str(exc)},
+        )

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] 新增 `docs/quant-research-lab.md` 描述模块定位、与现有回测的边界、9 阶段路线图与安全保证。
 - [chore] 新增 `requirements-quant.txt` 作为可选量化依赖清单（默认不安装，不影响 Cloud Run 镜像体积）。
 - [测试] 新增 `tests/quant_research/test_basics.py` 覆盖 feature flag disabled 路径、不破坏 app import、capabilities 返回稳定结构。
+- [新功能] Quant Research Lab Phase 2（Factor Lab）：新增 `src/quant_research/factors/` 模块（`safe_expression` AST 白名单、8 个内置因子、`registry`、`evaluator`），新增 `GET /api/v1/quant/factors` 与 `POST /api/v1/quant/factors/evaluate` 接口，输出 IC / RankIC / ICIR / 分组收益 / long-short / turnover / autocorrelation，严格无未来函数。
+- [新功能] 新增防 LLM 代码执行的 AST 白名单评估器 `safe_expression.py`：禁 `eval` / `exec` / `__import__` / 属性访问 / dunder / 未知函数调用；只允许 OHLCV 列引用 + 12 个白名单算子函数。
+- [测试] 新增 `tests/test_quant_research_factors.py` 覆盖危险表达式拒绝（12 条）、合法表达式编译（9 条）、8 个内置因子 smoke、evaluator 端到端（IC 真值 / 缺失股票覆盖率 / 输入校验）。
 
 ## [3.14.2] - 2026-04-30
 
