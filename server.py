@@ -57,6 +57,7 @@ _level = getattr(logging, _level_name, logging.INFO)
 setup_logging(
     log_prefix="api_server",
     console_level=_level,
+    log_dir=_config.log_dir,
     extra_quiet_loggers=["uvicorn", "fastapi"],
 )
 
