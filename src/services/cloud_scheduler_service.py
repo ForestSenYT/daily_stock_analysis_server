@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_JOB_NAME = "dsa-watchlist"
 _DEFAULT_TARGET_PATH = "/analyze"
 _DEFAULT_BODY: Dict[str, Any] = {"notify": True}
-_DEFAULT_ATTEMPT_DEADLINE_SECONDS = 3600  # 1h, matches Cloud Run timeout
+_DEFAULT_ATTEMPT_DEADLINE_SECONDS = 1800  # 30m, Cloud Scheduler HTTP target max
 
 _METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 _METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1"
