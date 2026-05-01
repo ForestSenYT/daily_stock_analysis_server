@@ -2010,13 +2010,29 @@ class Config:
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
-        """解析大盘复盘市场区域，非法值记录警告后回退为 cn"""
+        """解析大盘复盘市场区域，非法值记录警告后回退为 cn
+
+        合法形态：
+          - 单市场: ``cn`` / ``us`` / ``hk``
+          - 全市场: ``both``（= cn + hk + us，向后兼容）
+          - 子集（逗号分隔）: ``cn,us`` / ``cn,hk`` / ``hk,us`` 等
+        ``run_market_review`` 已经支持逗号子集语法，这里只是放开 parser。
+        """
         import logging
         v = (value or 'cn').strip().lower()
         if v in ('cn', 'us', 'hk', 'both'):
             return v
+        if ',' in v:
+            tokens = [t.strip() for t in v.split(',') if t.strip()]
+            valid = [t for t in tokens if t in ('cn', 'us', 'hk')]
+            # 去重保持顺序
+            seen: set[str] = set()
+            ordered = [t for t in valid if not (t in seen or seen.add(t))]
+            if ordered:
+                return ','.join(ordered)
         logging.getLogger(__name__).warning(
-            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'（合法值：cn / hk / us / both）"
+            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'"
+            "（合法值：cn / hk / us / both，或子集 cn,us 等）"
         )
         return 'cn'
 

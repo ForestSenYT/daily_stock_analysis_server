@@ -1456,7 +1456,11 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "MARKET_REVIEW_REGION": {
         "title": "Market Review Region",
-        "description": "Market region for review: cn (A-shares), hk (Hong Kong), us (US stocks), or both (all markets).",
+        "description": (
+            "Markets to include in the daily market review section. "
+            "cn (A-shares), hk (Hong Kong), us (US), both (= all three), "
+            "or a subset like cn,us."
+        ),
         "category": "system",
         "data_type": "string",
         "ui_control": "select",
@@ -1464,8 +1468,8 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "is_required": False,
         "is_editable": True,
         "default_value": "cn",
-        "options": ["cn", "hk", "us", "both"],
-        "validation": {"enum": ["cn", "hk", "us", "both"]},
+        "options": ["cn", "hk", "us", "cn,us", "cn,hk", "hk,us", "both"],
+        "validation": {"enum": ["cn", "hk", "us", "cn,us", "cn,hk", "hk,us", "both"]},
         "display_order": 47,
     },
     "MAX_WORKERS": {
