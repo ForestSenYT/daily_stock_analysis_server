@@ -690,7 +690,6 @@ def _run_analysis(stocks: List[str], request: CloudRunAnalyzeRequest) -> List[Di
     # Send the single consolidated email + (optional) market review.
     try:
         from src.notification import NotificationService
-        from analyzer_service import perform_market_review
 
         cfg = get_config()
         notifier = NotificationService(cfg)
@@ -701,9 +700,30 @@ def _run_analysis(stocks: List[str], request: CloudRunAnalyzeRequest) -> List[Di
         market_report: Optional[str] = None
         if getattr(cfg, "market_review_enabled", False):
             try:
-                # ``notifier=None`` here suppresses the market-review's own
-                # internal push; we batch it into our combined email below.
-                market_report = perform_market_review(config=cfg, notifier=None)
+                # IMPORTANT: do NOT use analyzer_service.perform_market_review here.
+                # That helper falls back to ``pipeline.notifier`` when given
+                # ``notifier=None`` and runs the underlying ``run_market_review``
+                # with ``send_notification=True``, which fires its own email
+                # before we batch the combined one — yielding two emails per
+                # /analyze call. We bypass it and call ``run_market_review``
+                # directly with ``send_notification=False`` so the only push
+                # is the consolidated one further down.
+                import uuid as _uuid
+                from src.core.market_review import run_market_review
+                from src.core.pipeline import StockAnalysisPipeline
+
+                _pipeline = StockAnalysisPipeline(
+                    config=cfg,
+                    query_id=_uuid.uuid4().hex,
+                    query_source="cloud-run",
+                )
+                market_report = run_market_review(
+                    notifier=_pipeline.notifier,
+                    analyzer=_pipeline.analyzer,
+                    search_service=_pipeline.search_service,
+                    send_notification=False,  # critical: suppress inner email
+                    merge_notification=False,
+                )
             except Exception:
                 logger.exception("market review failed; continuing with stock-only email")
                 market_report = None
