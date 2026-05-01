@@ -47,6 +47,10 @@ _DEFAULT_JOB_NAME = "dsa-watchlist"
 _DEFAULT_TARGET_PATH = "/analyze"
 _DEFAULT_BODY: Dict[str, Any] = {"notify": True}
 _DEFAULT_ATTEMPT_DEADLINE_SECONDS = 1800  # 30m, Cloud Scheduler HTTP target max
+# Scheduler default is "retry forever until max_retry_duration"; for daily
+# stock analysis a single retry storm = duplicate analyses + duplicate emails.
+# Hard-pin to 0 retries; analysis is run-once daily, retries should be opt-in.
+_DEFAULT_RETRY_COUNT = 0
 
 _METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 _METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1"
@@ -215,6 +219,10 @@ class CloudSchedulerService:
 
         deadline = duration_pb2.Duration(seconds=_DEFAULT_ATTEMPT_DEADLINE_SECONDS)
 
+        retry_config = scheduler_v1.RetryConfig(
+            retry_count=_DEFAULT_RETRY_COUNT,
+        )
+
         return scheduler_v1.Job(
             name=self._job_path(),
             description="DSA daily watchlist analysis (managed by WebUI)",
@@ -222,6 +230,7 @@ class CloudSchedulerService:
             time_zone=timezone,
             attempt_deadline=deadline,
             http_target=http_target,
+            retry_config=retry_config,
         )
 
     # ------------------------------------------------------------------

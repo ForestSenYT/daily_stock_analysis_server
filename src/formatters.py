@@ -113,98 +113,157 @@ def markdown_to_html_document(markdown_text: str) -> str:
         extras=["tables", "fenced-code-blocks", "break-on-newline", "cuddled-lists"],
     )
 
+    # Conservative for email: literal hex (no CSS vars / :hover / :first-child),
+    # safe in Gmail/Outlook/Apple Mail. Same CSS works for imgkit md2img too.
     css_style = """
+            html, body {
+                margin: 0;
+                padding: 0;
+                background-color: #ffffff;
+            }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                    "SF Pro Display", "Helvetica Neue", Helvetica, "PingFang SC",
+                    "Microsoft YaHei", Arial, sans-serif;
+                -webkit-font-smoothing: antialiased;
+                -moz-osx-font-smoothing: grayscale;
+                color: #1d1d1f;
+                font-size: 16px;
                 line-height: 1.5;
-                color: #24292e;
-                font-size: 14px;
-                padding: 15px;
-                max-width: 900px;
+                letter-spacing: -0.01em;
+                padding: 40px 24px;
+                max-width: 640px;
                 margin: 0 auto;
             }
             h1 {
-                font-size: 20px;
-                border-bottom: 1px solid #eaecef;
-                padding-bottom: 0.3em;
-                margin-top: 1.2em;
-                margin-bottom: 0.8em;
-                color: #0366d6;
-            }
-            h2 {
-                font-size: 18px;
-                border-bottom: 1px solid #eaecef;
-                padding-bottom: 0.3em;
-                margin-top: 1.0em;
-                margin-bottom: 0.6em;
-            }
-            h3 {
-                font-size: 16px;
-                margin-top: 0.8em;
-                margin-bottom: 0.4em;
-            }
-            p {
-                margin-top: 0;
-                margin-bottom: 8px;
-            }
-            table {
-                border-collapse: collapse;
-                width: 100%;
-                margin: 12px 0;
-                display: block;
-                overflow-x: auto;
-                font-size: 13px;
-            }
-            th, td {
-                border: 1px solid #dfe2e5;
-                padding: 6px 10px;
-                text-align: left;
-            }
-            th {
-                background-color: #f6f8fa;
+                font-size: 28px;
                 font-weight: 600;
-            }
-            tr:nth-child(2n) {
-                background-color: #f8f8f8;
-            }
-            tr:hover {
-                background-color: #f1f8ff;
-            }
-            blockquote {
-                color: #6a737d;
-                border-left: 0.25em solid #dfe2e5;
-                padding: 0 1em;
-                margin: 0 0 10px 0;
-            }
-            code {
-                padding: 0.2em 0.4em;
-                margin: 0;
-                font-size: 85%;
-                background-color: rgba(27,31,35,0.05);
-                border-radius: 3px;
-                font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-            }
-            pre {
-                padding: 12px;
-                overflow: auto;
-                line-height: 1.45;
-                background-color: #f6f8fa;
-                border-radius: 3px;
-                margin-bottom: 10px;
-            }
-            hr {
-                height: 0.25em;
+                line-height: 1.2;
+                letter-spacing: -0.011em;
+                color: #1d1d1f;
+                margin: 40px 0 16px;
                 padding: 0;
-                margin: 16px 0;
-                background-color: #e1e4e8;
                 border: 0;
             }
+            h2 {
+                font-size: 22px;
+                font-weight: 600;
+                line-height: 1.27;
+                letter-spacing: -0.014em;
+                color: #1d1d1f;
+                margin: 32px 0 12px;
+                padding: 0;
+                border: 0;
+            }
+            h3 {
+                font-size: 17px;
+                font-weight: 600;
+                line-height: 1.3;
+                letter-spacing: -0.022em;
+                color: #1d1d1f;
+                margin: 24px 0 8px;
+            }
+            h4 {
+                font-size: 15px;
+                font-weight: 600;
+                color: #1d1d1f;
+                margin: 20px 0 6px;
+            }
+            p {
+                margin: 0 0 14px;
+                color: #1d1d1f;
+            }
+            a {
+                color: #0066cc;
+                text-decoration: none;
+            }
+            strong {
+                font-weight: 600;
+                color: #1d1d1f;
+            }
+            em {
+                font-style: italic;
+                color: #6e6e73;
+            }
+            hr {
+                height: 1px;
+                background-color: #d2d2d7;
+                border: 0;
+                margin: 36px 0;
+                padding: 0;
+            }
             ul, ol {
-                padding-left: 20px;
-                margin-bottom: 10px;
+                margin: 8px 0 16px;
+                padding-left: 22px;
+                color: #1d1d1f;
             }
             li {
-                margin: 2px 0;
+                margin: 4px 0;
+            }
+            blockquote {
+                margin: 14px 0;
+                padding: 2px 16px;
+                border-left: 2px solid #d2d2d7;
+                color: #6e6e73;
+            }
+            code {
+                font-family: "SF Mono", SFMono-Regular, ui-monospace, Menlo,
+                    Consolas, "Liberation Mono", monospace;
+                font-size: 13px;
+                background-color: #f5f5f7;
+                color: #1d1d1f;
+                padding: 2px 6px;
+                border-radius: 4px;
+            }
+            pre {
+                background-color: #f5f5f7;
+                color: #1d1d1f;
+                padding: 16px 20px;
+                border-radius: 12px;
+                overflow-x: auto;
+                margin: 14px 0;
+                line-height: 1.5;
+                font-size: 13px;
+            }
+            pre code {
+                background-color: transparent;
+                padding: 0;
+                border-radius: 0;
+                font-size: 13px;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 16px 0;
+                font-size: 14px;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid #d2d2d7;
+            }
+            th, td {
+                padding: 12px 16px;
+                text-align: left;
+                border: 0;
+                border-bottom: 1px solid #d2d2d7;
+                vertical-align: top;
+            }
+            th {
+                font-size: 12px;
+                font-weight: 600;
+                color: #6e6e73;
+                background-color: #f5f5f7;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            tr:last-child td {
+                border-bottom: 0;
+            }
+            img {
+                max-width: 100%;
+                height: auto;
+                border-radius: 12px;
+                margin: 16px 0;
             }
         """
 

@@ -590,51 +590,146 @@ def _get_task(task_id: str) -> Optional[Dict[str, Any]]:
 # 实际分析调用（同步函数，需要在 threadpool 里调用以避免阻塞事件循环）
 # ============================================================
 
-def _analyze_one(stock_code: str, report_type: str, force_refresh: bool, notify: bool) -> Dict[str, Any]:
-    """Wrap the existing AnalysisService for a single stock."""
-    from src.services.analysis_service import AnalysisService
+def _analyze_one(stock_code: str, report_type: str) -> tuple[Dict[str, Any], Optional[Any]]:
+    """Run analysis for a single stock without firing per-stock notifications.
 
-    query_id = uuid.uuid4().hex
-    service = AnalysisService()
-    result = service.analyze_stock(
-        stock_code=stock_code,
-        report_type=report_type,
-        force_refresh=force_refresh,
-        query_id=query_id,
-        send_notification=notify,
-    )
-    if result is None:
-        return {
-            "stock_code": stock_code,
-            "success": False,
-            "error": service.last_error or "analysis_failed",
-            "query_id": query_id,
-        }
-    return {
-        "stock_code": result.get("stock_code", stock_code),
-        "stock_name": result.get("stock_name"),
+    Uses the top-level ``analyzer_service.analyze_stock`` helper because
+    we need the raw ``AnalysisResult`` object (not the flattened dict from
+    ``AnalysisService.analyze_stock``) so we can pass it to
+    ``notifier.generate_aggregate_report`` for the consolidated email.
+
+    Passing ``notifier=None`` suppresses the per-stock email — the whole
+    point of the Cloud-Run consolidated-email flow.
+
+    Returns ``(api_dict, raw_result)`` so the API response surfaces basic
+    fields per stock and the caller can collect ``raw_result`` objects
+    across the batch for the aggregate report.
+    """
+    from analyzer_service import analyze_stock as _analyzer_analyze_stock
+
+    full_report = report_type in ("detailed", "full")
+    try:
+        raw = _analyzer_analyze_stock(
+            stock_code=stock_code,
+            config=get_config(),
+            full_report=full_report,
+            notifier=None,  # per-stock email suppressed
+        )
+    except Exception as exc:
+        logger.exception("analyze_stock raised for %s", stock_code)
+        return (
+            {"stock_code": stock_code, "success": False, "error": str(exc)},
+            None,
+        )
+
+    if raw is None:
+        return (
+            {"stock_code": stock_code, "success": False, "error": "analysis_failed"},
+            None,
+        )
+
+    api_dict = {
+        "stock_code": getattr(raw, "code", stock_code),
+        "stock_name": getattr(raw, "name", None),
         "success": True,
-        "query_id": query_id,
-        "report": result.get("report"),
+        "sentiment_score": getattr(raw, "sentiment_score", None),
+        "operation_advice": getattr(raw, "operation_advice", None),
+        "trend_prediction": getattr(raw, "trend_prediction", None),
     }
+    return api_dict, raw
+
+
+def _build_consolidated_email_body(
+    raw_results: List[Any],
+    market_report: Optional[str],
+    report_type: str,
+    notifier,
+) -> Optional[str]:
+    """Compose the single combined notification body, mirroring the
+    ``--schedule`` mode's "merge_notification" path
+    (see ``main.py:504-521``)."""
+    parts: List[str] = []
+    if market_report:
+        parts.append(f"# 📈 大盘复盘\n\n{market_report}")
+    if raw_results:
+        try:
+            dashboard = notifier.generate_aggregate_report(raw_results, report_type)
+        except Exception as exc:
+            logger.exception("notifier.generate_aggregate_report failed: %s", exc)
+            dashboard = None
+        if dashboard:
+            parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard}")
+    if not parts:
+        return None
+    return "\n\n---\n\n".join(parts)
 
 
 def _run_analysis(stocks: List[str], request: CloudRunAnalyzeRequest) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+    """Cloud Run analysis flow: per-stock emails are suppressed; one combined
+    email (with optional market review) is sent at the end if ``notify=True``.
+    """
+    api_results: List[Dict[str, Any]] = []
+    raw_results: List[Any] = []
+
     for code in stocks:
         try:
-            out.append(
-                _analyze_one(
-                    stock_code=code,
-                    report_type=request.report_type,
-                    force_refresh=request.force_refresh,
-                    notify=request.notify,
-                )
+            api_dict, raw = _analyze_one(
+                stock_code=code,
+                report_type=request.report_type,
             )
+            api_results.append(api_dict)
+            if raw is not None:
+                raw_results.append(raw)
         except Exception as exc:  # 单只股票失败不影响整体
             logger.exception("Cloud Run /analyze 失败: stock=%s", code)
-            out.append({"stock_code": code, "success": False, "error": str(exc)})
-    return out
+            api_results.append({"stock_code": code, "success": False, "error": str(exc)})
+
+    if not request.notify:
+        return api_results
+
+    # Send the single consolidated email + (optional) market review.
+    try:
+        from src.notification import NotificationService
+        from analyzer_service import perform_market_review
+
+        cfg = get_config()
+        notifier = NotificationService(cfg)
+        if not notifier.is_available():
+            logger.info("notifier not available; skipping consolidated email")
+            return api_results
+
+        market_report: Optional[str] = None
+        if getattr(cfg, "market_review_enabled", False):
+            try:
+                # ``notifier=None`` here suppresses the market-review's own
+                # internal push; we batch it into our combined email below.
+                market_report = perform_market_review(config=cfg, notifier=None)
+            except Exception:
+                logger.exception("market review failed; continuing with stock-only email")
+                market_report = None
+
+        body = _build_consolidated_email_body(
+            raw_results=raw_results,
+            market_report=market_report,
+            report_type=request.report_type,
+            notifier=notifier,
+        )
+        if not body:
+            logger.info("no content to send (no successful analyses + no market report)")
+            return api_results
+
+        if notifier.send(body, email_send_to_all=True):
+            logger.info(
+                "Cloud Run consolidated email sent: %d stocks + market_review=%s",
+                len(raw_results),
+                bool(market_report),
+            )
+        else:
+            logger.warning("Cloud Run consolidated email failed to send")
+    except Exception:
+        logger.exception("Cloud Run consolidated-email path failed")
+
+    return api_results
 
 
 # ============================================================
