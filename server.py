@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import Depends, HTTPException, Request, status  # noqa: E402
 from fastapi.concurrency import run_in_threadpool  # noqa: E402
-from fastapi.responses import HTMLResponse, RedirectResponse, Response  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402
@@ -162,13 +162,17 @@ _PUBLIC_PREFIX = (
     "/api/v1/auth/",
 )
 
-# 这些前缀走 API_TOKEN Bearer 校验（在路由层用 dependency 实现），
-# 不应被前端管理员登录拦截器再拦一道
-_API_PREFIX = (
+# Cloud Run /analyze 系列：走 API_TOKEN Bearer 校验（路由层 dependency 实现），
+# 跟管理员浏览器 session 解耦——给程序化调用方用
+_BEARER_API_PREFIX = (
     "/analyze",
     "/tasks/",
+)
+
+# /api/v1/*（除了 /api/v1/auth/*）：必须登录才能调
+# 之前是直接放行的；现在改成需要 session（保护 WebUI 设置页等内部接口）
+_SESSION_API_PREFIX = (
     "/api/v1/",
-    "/api/health",
 )
 
 
@@ -181,10 +185,20 @@ def _is_public_path(path: str) -> bool:
     return False
 
 
-def _is_api_path(path: str) -> bool:
+def _is_bearer_api(path: str) -> bool:
+    """走 API_TOKEN Bearer 校验的路径——AdminLoginMiddleware 不应拦截。"""
     if path == "/analyze":
         return True
-    for prefix in _API_PREFIX:
+    for prefix in _BEARER_API_PREFIX:
+        if path.startswith(prefix):
+            return True
+    return False
+
+
+def _is_session_api(path: str) -> bool:
+    """需要管理员 session 的 API 路径，未登录时返回 401 JSON 而非跳 /login。"""
+    # /api/v1/auth/* 在 _PUBLIC_PREFIX 已经早一步放行了，这里不会再命中
+    for prefix in _SESSION_API_PREFIX:
         if path.startswith(prefix):
             return True
     return False
@@ -271,12 +285,17 @@ def _safe_next_path(raw: str | None) -> str:
 class AdminLoginMiddleware(BaseHTTPMiddleware):
     """
     入站请求依次：
-      1. 命中 /login (GET/POST) / /logout → 直接处理
-      2. 公开路径 → 直接放行
-      3. API 路径（Bearer 鉴权另算） → 直接放行
-      4. ADMIN_PASSWORD 未配置 → 直接放行（开发模式）
-      5. /docs 系列且生产环境 → 必须 admin 已登录，否则跳 /login
-      6. 其余前端路径 → 必须 admin 已登录，否则跳 /login
+      1. /login (GET/POST) / /logout → 直接处理
+      2. 永远公开路径 → 放行
+      3. Bearer-API（/analyze、/tasks/）→ 放行（在路由层做 API_TOKEN 校验）
+      4. ADMIN_PASSWORD 未配置 → 放行（开发模式）
+      5. Session-API（/api/v1/*，除 /api/v1/auth/*）：
+           - 已登录 → 放行
+           - 未登录 → 401 JSON（不跳 /login，避免前端 fetch 报错）
+      6. /docs 系列：开发环境放行；生产环境视为前端，按下一条处理
+      7. 其余前端路径：
+           - 已登录 → 放行
+           - 未登录 → 303 跳 /login
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -296,7 +315,6 @@ class AdminLoginMiddleware(BaseHTTPMiddleware):
                 form = await request.form()
                 submitted = (form.get("password") or "").strip()
                 if not _ADMIN_PASSWORD:
-                    # 没设置密码：拒绝登录，让运维知道服务还没配
                     return _render_login_page(
                         error="ADMIN_PASSWORD is not configured on the server.",
                     )
@@ -321,23 +339,34 @@ class AdminLoginMiddleware(BaseHTTPMiddleware):
         if _is_public_path(path):
             return await call_next(request)
 
-        # ----- API 路径（自带 Bearer/Cookie 鉴权） ----------------------
-        if _is_api_path(path):
+        # ----- Bearer 校验的 API（/analyze、/tasks/）-------------------
+        if _is_bearer_api(path):
             return await call_next(request)
 
-        # ----- 没设置 ADMIN_PASSWORD：开发模式直接放行 -------------------
+        # ----- 没设置 ADMIN_PASSWORD：开发模式直接放行 ------------------
         if not _ADMIN_PASSWORD:
             return await call_next(request)
 
-        # ----- 需要管理员登录态 -----------------------------------------
-        # /docs /redoc /openapi.json：在生产环境也必须先登录
+        # ----- /api/v1/* (除 /api/v1/auth/*)：要求 session，未登录给 401 JSON -----
+        if _is_session_api(path):
+            if request.session.get("is_admin") is True:
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "unauthorized",
+                    "message": "Admin session required. Login at /login.",
+                },
+            )
+
+        # ----- /docs 系列：开发模式放行；生产模式视为前端，需要登录 ----
         if _docs_path(path) and not _IS_PRODUCTION:
             return await call_next(request)
 
+        # ----- 前端 HTML 页面：未登录跳 /login -------------------------
         if request.session.get("is_admin") is True:
             return await call_next(request)
 
-        # 未登录前端 / 未登录 docs：跳到登录页
         login_url = "/login?next=" + quote(path, safe="/")
         return RedirectResponse(login_url, status_code=303)
 
