@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] Quant Research Lab Phase 3：研究级策略回测引擎落地——`src/quant_research/backtest/`（engine/costs/metrics）+ API `POST /api/v1/quant/backtests/run` 与 `GET /api/v1/quant/backtests/{run_id}`，支持 top-k long-only / 仿真多空 / 等权基准三种策略、daily/weekly/monthly 调仓、commission+slippage 成本模型、可选 benchmark 比较，输出 Sharpe/Sortino/Calmar/最大回撤/turnover/IR 等 13 项指标。
+- [新功能] 回测引擎默认启用 1 个交易日的信号滞后（structural no-lookahead guard）；`lookahead_bias_guard` 在 diagnostics 中显式为 true；assumptions 中记录 commission_bps / slippage_bps / rebalance_frequency / allows_short / engine_version。
+- [文档] `docs/quant-research-lab.md` 新增 Phase 3 端点说明、策略类型、causality 约束与硬上限。
+- [测试] 新增 `tests/test_quant_research_backtest.py`：16 个用例覆盖 Sharpe/Sortino/Drawdown/IR/turnover 数值正确性、CostModel 边界、equal-weight 基线、top-k 选股、随机数据下的无未来函数回归（|TR|≤25%）。
 - [修复] 收紧 Cloud Run/WebUI 鉴权边界：`/api/v1/auth/settings`、`/change-password`、`/logout` 需要管理员 session，`/login` 增加失败限流，`API_TOKEN` 使用 constant-time 比较且非 JWT bearer 不再进入 OIDC 验证。
 - [改进] `/analyze` 与 `/analyze/async` 增加股票数量、代码长度和字符格式限制；异步任务增加并发上限、TTL 与最大内存记录数，`/info` 不再公开 `STOCK_LIST`。
 - [改进] Cloud Scheduler OIDC 支持 `OIDC_EXPECTED_AUDIENCES` 多 audience 配置，并与服务端校验使用同一 canonical audience。

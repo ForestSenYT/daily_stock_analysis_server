@@ -43,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-2-factor-lab"
+_CURRENT_PHASE = "phase-3-backtest-lab"
 
 
 class QuantResearchService:
@@ -322,3 +322,202 @@ class QuantResearchService:
             diagnostics=outputs.diagnostics,
             assumptions=outputs.assumptions,
         )
+
+    # =================================================================
+    # Phase 3 — Research Backtest
+    # =================================================================
+    #
+    # Persistence intentionally omitted in P3: results live in a
+    # bounded in-memory cache on this service class so
+    # ``GET /api/v1/quant/backtests/{run_id}`` works for the rest of the
+    # session. With Cloud Run max-instances=1 this is "good enough" —
+    # Phase 4+ may add a ``quant_backtest_results`` table if
+    # cross-instance retention matters.
+
+    _backtest_cache: Optional[object] = None  # type: ignore[assignment]
+    _BACKTEST_CACHE_MAX = 32
+
+    def _cache(self):
+        from collections import OrderedDict
+        cls = type(self)
+        if cls._backtest_cache is None:
+            cls._backtest_cache = OrderedDict()
+        return cls._backtest_cache
+
+    def run_backtest(self, request):
+        """Run a research backtest. ``request`` is a
+        ``ResearchBacktestRequest`` Pydantic model.
+
+        Endpoint catches ``QuantResearchValidationError`` → 400 and
+        ``QuantResearchDisabledError`` → 503; any unexpected exception
+        bubbles up and the endpoint returns a generic 500 (this matches
+        the pattern used by ``evaluate_factor``).
+        """
+        if not self.enabled:
+            raise QuantResearchDisabledError(
+                "Quant Research Lab is disabled. "
+                "Set QUANT_RESEARCH_ENABLED=true to enable it."
+            )
+
+        from src.quant_research.backtest import (
+            BacktestInputs,
+            CostModel,
+            MAX_LOOKBACK_DAYS as _BT_MAX_DAYS,
+            MAX_STOCKS as _BT_MAX_STOCKS,
+            VALID_REBALANCE,
+            VALID_STRATEGIES,
+            run_backtest as _run,
+        )
+        from src.quant_research.schemas import (
+            ResearchBacktestDiagnostics,
+            ResearchBacktestMetrics,
+            ResearchBacktestPositionSnapshot,
+            ResearchBacktestResult,
+        )
+
+        # ----- Input validation ---------------------------------------
+        if request.strategy not in VALID_STRATEGIES:
+            raise QuantResearchValidationError(
+                f"Unknown strategy {request.strategy!r}. "
+                f"Allowed: {list(VALID_STRATEGIES)}",
+                field="strategy",
+            )
+        if request.rebalance_frequency not in VALID_REBALANCE:
+            raise QuantResearchValidationError(
+                f"Unknown rebalance_frequency {request.rebalance_frequency!r}. "
+                f"Allowed: {list(VALID_REBALANCE)}",
+                field="rebalance_frequency",
+            )
+        try:
+            start = date.fromisoformat(request.start_date)
+            end = date.fromisoformat(request.end_date)
+        except ValueError as exc:
+            raise QuantResearchValidationError(
+                f"Invalid date format (use YYYY-MM-DD): {exc}",
+                field="start_date/end_date",
+            )
+        if start > end:
+            raise QuantResearchValidationError(
+                "start_date must be on or before end_date.",
+                field="start_date",
+            )
+        if (end - start).days > _BT_MAX_DAYS:
+            raise QuantResearchValidationError(
+                f"Backtest window too large: max {_BT_MAX_DAYS} calendar days.",
+                field="start_date/end_date",
+            )
+        if len(request.stocks) > _BT_MAX_STOCKS:
+            raise QuantResearchValidationError(
+                f"Too many stocks: max {_BT_MAX_STOCKS}.",
+                field="stocks",
+            )
+        if request.strategy != "equal_weight_baseline":
+            both = bool(request.builtin_factor_id) and bool(request.expression)
+            none = not request.builtin_factor_id and not request.expression
+            if both or none:
+                raise QuantResearchValidationError(
+                    "Strategy requires exactly one of `builtin_factor_id` "
+                    "or `expression`.",
+                    field="builtin_factor_id/expression",
+                )
+
+        try:
+            cost_model = CostModel.validated(
+                commission_bps=request.commission_bps,
+                slippage_bps=request.slippage_bps,
+            )
+        except ValueError as exc:
+            raise QuantResearchValidationError(
+                str(exc), field="commission_bps/slippage_bps"
+            ) from exc
+
+        # ----- Run -----------------------------------------------------
+        try:
+            outputs = _run(
+                BacktestInputs(
+                    strategy=request.strategy,
+                    stocks=list(request.stocks),
+                    start_date=start,
+                    end_date=end,
+                    rebalance_frequency=request.rebalance_frequency,
+                    builtin_factor_id=request.builtin_factor_id,
+                    expression=request.expression,
+                    factor_name=request.factor_name,
+                    top_k=request.top_k,
+                    quantile_count=request.quantile_count,
+                    initial_cash=request.initial_cash,
+                    cost_model=cost_model,
+                    min_holding_days=request.min_holding_days,
+                    benchmark=request.benchmark,
+                )
+            )
+        except ValueError as exc:
+            raise QuantResearchValidationError(
+                str(exc), field="factor"
+            ) from exc
+
+        # ----- Map engine output -> Pydantic schema -------------------
+        result = ResearchBacktestResult(
+            enabled=True,
+            run_id=outputs.run_id,
+            strategy=outputs.strategy,
+            factor_kind=outputs.factor_kind,
+            factor_id=outputs.factor_id,
+            expression=outputs.expression,
+            stock_pool=outputs.stock_pool,
+            start_date=outputs.start_date.isoformat(),
+            end_date=outputs.end_date.isoformat(),
+            rebalance_frequency=outputs.rebalance_frequency,
+            nav_curve=outputs.nav_curve,
+            metrics=ResearchBacktestMetrics(
+                total_return=outputs.metrics.total_return,
+                annualized_return=outputs.metrics.annualized_return,
+                annualized_volatility=outputs.metrics.annualized_volatility,
+                sharpe=outputs.metrics.sharpe,
+                sortino=outputs.metrics.sortino,
+                calmar=outputs.metrics.calmar,
+                max_drawdown=outputs.metrics.max_drawdown,
+                win_rate=outputs.metrics.win_rate,
+                turnover=outputs.metrics.turnover,
+                cost_drag=outputs.metrics.cost_drag,
+                benchmark_return=outputs.metrics.benchmark_return,
+                excess_return=outputs.metrics.excess_return,
+                information_ratio=outputs.metrics.information_ratio,
+            ),
+            diagnostics=ResearchBacktestDiagnostics(
+                data_coverage=outputs.diagnostics.data_coverage,
+                missing_symbols=outputs.diagnostics.missing_symbols,
+                insufficient_history_symbols=outputs.diagnostics.insufficient_history_symbols,
+                rebalance_count=outputs.diagnostics.rebalance_count,
+                lookahead_bias_guard=outputs.diagnostics.lookahead_bias_guard,
+                assumptions=outputs.diagnostics.assumptions,
+            ),
+            positions=[
+                ResearchBacktestPositionSnapshot(
+                    date=p.date.isoformat(),
+                    weights=p.weights,
+                    nav=p.nav,
+                    cash_reserve=p.cash_reserve,
+                    cost_deducted=p.cost_deducted,
+                )
+                for p in outputs.positions
+            ],
+            created_at=outputs.created_at,
+        )
+
+        # ----- Cache (LRU) -------------------------------------------
+        cache = self._cache()
+        cache[result.run_id] = result
+        cache.move_to_end(result.run_id)
+        while len(cache) > self._BACKTEST_CACHE_MAX:
+            cache.popitem(last=False)
+        return result
+
+    def get_backtest(self, run_id: str):
+        """Lookup a previously-run backtest by run_id. Returns None if
+        not in the in-memory cache (no DB persistence in Phase 3)."""
+        if not self.enabled:
+            raise QuantResearchDisabledError(
+                "Quant Research Lab is disabled."
+            )
+        return self._cache().get(run_id)

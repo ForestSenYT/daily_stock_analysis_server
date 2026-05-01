@@ -279,3 +279,141 @@ class FactorEvaluationResult(BaseModel):
     metrics: FactorMetricSummary
     diagnostics: List[str] = Field(default_factory=list)
     assumptions: Dict[str, Any] = Field(default_factory=dict)
+
+
+# =====================================================================
+# Phase 3 — Research Backtest Lab
+# =====================================================================
+#
+# Independent of the existing AI-decision validation backtest under
+# ``/api/v1/backtest/*``. These shapes describe a factor-driven trading
+# *simulation*: target weights, NAV curve, performance metrics. They
+# never describe live trades.
+
+class ResearchBacktestRequest(BaseModel):
+    """Request body for ``POST /api/v1/quant/backtests/run``.
+
+    Either ``builtin_factor_id`` or ``expression`` is required for
+    factor strategies; ``equal_weight_baseline`` ignores both.
+    """
+
+    strategy: str = Field(
+        description=(
+            "Strategy type: ``top_k_long_only``, ``quantile_long_short`` "
+            "(simulated — no real shorting/borrow), or "
+            "``equal_weight_baseline`` (factor-free baseline)."
+        ),
+    )
+    stocks: List[str] = Field(description="Stock pool. Hard cap = 50.")
+    start_date: str = Field(description="Inclusive ISO date.")
+    end_date: str = Field(description="Inclusive ISO date.")
+    rebalance_frequency: str = Field(
+        default="weekly",
+        description="``daily`` | ``weekly`` | ``monthly``.",
+    )
+
+    builtin_factor_id: Optional[str] = Field(
+        default=None,
+        description="Factor id from ``GET /api/v1/quant/factors``.",
+    )
+    expression: Optional[str] = Field(
+        default=None,
+        description=(
+            "Free-form factor expression (parsed by the AST whitelist; "
+            "see ``factors/safe_expression.py``). Mutually exclusive "
+            "with ``builtin_factor_id``."
+        ),
+    )
+    factor_name: Optional[str] = Field(default=None, description="Display name.")
+
+    top_k: Optional[int] = Field(
+        default=None,
+        description="Used by ``top_k_long_only``. Default = ⅕ of pool.",
+    )
+    quantile_count: int = Field(
+        default=5,
+        ge=2, le=10,
+        description="Used by ``quantile_long_short``.",
+    )
+
+    initial_cash: float = Field(default=1_000_000.0, gt=0)
+    commission_bps: float = Field(default=10.0, ge=0, le=1000)
+    slippage_bps: float = Field(default=5.0, ge=0, le=1000)
+
+    min_holding_days: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Skip rebalances when a position is younger than this.",
+    )
+    benchmark: Optional[str] = Field(
+        default=None,
+        description="Optional benchmark ticker, e.g. ``SPY`` / ``QQQ``.",
+    )
+
+
+class ResearchBacktestMetrics(BaseModel):
+    """All metrics in one block. Every field is Optional because short
+    or degenerate runs can legitimately fail to compute some of them."""
+
+    total_return: Optional[float] = None
+    annualized_return: Optional[float] = None
+    annualized_volatility: Optional[float] = None
+    sharpe: Optional[float] = None
+    sortino: Optional[float] = None
+    calmar: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    win_rate: Optional[float] = None
+    turnover: Optional[float] = None
+    cost_drag: Optional[float] = None
+    benchmark_return: Optional[float] = None
+    excess_return: Optional[float] = None
+    information_ratio: Optional[float] = None
+
+
+class ResearchBacktestPositionSnapshot(BaseModel):
+    """One rebalance day's position state."""
+
+    date: str = Field(description="ISO date of the rebalance.")
+    weights: Dict[str, float] = Field(
+        description="Stock code → weight. Negative = short (simulated)."
+    )
+    nav: float
+    cash_reserve: float = 0.0  # Phase 3 always 0 (fully invested)
+    cost_deducted: float = Field(
+        default=0.0,
+        description="Dollar transaction cost charged on this rebalance.",
+    )
+
+
+class ResearchBacktestDiagnostics(BaseModel):
+    """Everything a researcher needs to interpret the result."""
+
+    data_coverage: Dict[str, Any] = Field(default_factory=dict)
+    missing_symbols: List[str] = Field(default_factory=list)
+    insufficient_history_symbols: List[str] = Field(default_factory=list)
+    rebalance_count: int = 0
+    lookahead_bias_guard: bool = True
+    assumptions: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchBacktestResult(BaseModel):
+    """Top-level response for ``POST /api/v1/quant/backtests/run`` and
+    ``GET /api/v1/quant/backtests/{run_id}``."""
+
+    enabled: bool = True
+    run_id: str
+    strategy: str
+    factor_kind: str = Field(description="``builtin`` | ``expression`` | ``n/a``")
+    factor_id: Optional[str] = None
+    expression: Optional[str] = None
+    stock_pool: List[str]
+    start_date: str
+    end_date: str
+    rebalance_frequency: str
+    nav_curve: List[Dict[str, Any]] = Field(
+        description="[{\"date\": iso, \"nav\": float}, ...]",
+    )
+    metrics: ResearchBacktestMetrics
+    diagnostics: ResearchBacktestDiagnostics
+    positions: List[ResearchBacktestPositionSnapshot]
+    created_at: str

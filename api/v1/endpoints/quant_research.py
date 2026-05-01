@@ -33,6 +33,8 @@ from src.quant_research.schemas import (
     FactorRegistryResponse,
     QuantResearchCapabilities,
     QuantResearchStatus,
+    ResearchBacktestRequest,
+    ResearchBacktestResult,
 )
 from src.quant_research.service import QuantResearchService
 
@@ -184,3 +186,105 @@ def quant_evaluate_factor(request: FactorEvaluationRequest) -> FactorEvaluationR
             status_code=500,
             detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
         )
+
+
+# =====================================================================
+# Phase 3 — Research Backtest endpoints
+# =====================================================================
+#
+# Mirror the same admin-session protection + structured error mapping
+# as the factor endpoints. ``run_backtest`` is synchronous; with the
+# Cloud Run 30-min request timeout that's enough for the input limits
+# we enforce in the service (≤ 50 stocks, ≤ 366 days). A future async
+# variant can reuse the same service method via background task pattern
+# already used by ``/analyze/async``.
+
+@router.post(
+    "/backtests/run",
+    response_model=ResearchBacktestResult,
+    summary="Run a research backtest",
+    description=(
+        "Simulate a factor-driven trading strategy on the supplied stock "
+        "pool. Independent from ``/api/v1/backtest/*`` (which validates "
+        "AI historical decisions). Returns NAV curve, daily metrics, "
+        "and rebalance-day position snapshots. Caches the result in "
+        "memory for follow-up ``GET /backtests/{run_id}`` calls during "
+        "the same instance lifetime."
+    ),
+    responses={
+        200: {"description": "Backtest finished (check diagnostics for coverage gaps)"},
+        400: {"description": "Validation error (bad strategy / dates / factor / costs)"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_run_backtest(request: ResearchBacktestRequest) -> ResearchBacktestResult:
+    try:
+        return _service().run_backtest(request)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": _QUANT_VALIDATION_MESSAGE,
+                "field": exc.field,
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research run_backtest failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+
+
+@router.get(
+    "/backtests/{run_id}",
+    response_model=ResearchBacktestResult,
+    summary="Fetch a previously-run backtest",
+    description=(
+        "Look up a backtest result by ``run_id`` returned from "
+        "``POST /backtests/run``. Phase 3 keeps results in an in-memory "
+        "cache (≤32 most recent on this instance); a 404 is returned if "
+        "the run has aged out or the instance restarted. Phase 4+ may "
+        "add a database-backed history."
+    ),
+    responses={
+        200: {"description": "Found"},
+        404: {"description": "Not in cache (expired or different instance)"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_get_backtest(run_id: str) -> ResearchBacktestResult:
+    try:
+        result = _service().get_backtest(run_id)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research get_backtest failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "quant_research_not_found",
+                "message": "Backtest run_id not found in cache.",
+            },
+        )
+    return result

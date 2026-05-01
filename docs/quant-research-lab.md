@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 2 — Factor Lab** (this build).
+> Status: **Phase 3 — Research Backtest Lab** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -187,13 +187,90 @@ using only rows ≤ *t*; forward return at *t* is `close[t+window]/close[t]
 which causal validation path was used (`builtin_registry_causal_review` for
 built-ins, `safe_expression_static_validation` for custom expressions).
 
+### `POST /api/v1/quant/backtests/run` *(Phase 3)*
+
+Simulate a factor-driven trading strategy on the supplied stock pool.
+**Independent from `/api/v1/backtest/*`** (which validates AI historical
+decisions). Returns NAV curve, daily metrics, and rebalance-day position
+snapshots.
+
+Request body (`ResearchBacktestRequest`):
+```json
+{
+  "strategy": "top_k_long_only",
+  "stocks": ["NVDA","AAPL","MSFT","AMD","GOOG","META","AMZN","TSLA"],
+  "start_date": "2026-01-01",
+  "end_date": "2026-04-30",
+  "rebalance_frequency": "weekly",
+  "builtin_factor_id": "ma_ratio_5_20",
+  "top_k": 3,
+  "initial_cash": 1000000,
+  "commission_bps": 10,
+  "slippage_bps": 5,
+  "benchmark": "SPY"
+}
+```
+
+**Strategy types**:
+- `top_k_long_only` — hold top-K stocks by factor, equal-weight, refresh on rebalance days.
+- `quantile_long_short` — long top quantile, short bottom (simulated; we don't model borrow / locate).
+- `equal_weight_baseline` — ignore the factor, equal-weight every stock. Use as a comparison anchor.
+
+**Rebalance frequency**: `daily` / `weekly` / `monthly` (last trading day of each period).
+
+**Causality**: weights on day *t* are computed from the factor at the trading day strictly before *t* (1 day signal lag). Day-*t* PnL is `Σ weight × close-to-close return from t-1 to t`. The `lookahead_bias_guard` field in diagnostics is always `true` because the guard is structural, not advisory.
+
+**Hard limits**: `stocks ≤ 50`, `(end - start) ≤ 366 days`, `commission_bps + slippage_bps ≤ 1000`.
+
+Response (`ResearchBacktestResult`) — partial:
+```json
+{
+  "enabled": true,
+  "run_id": "abc...",
+  "strategy": "top_k_long_only",
+  "factor_kind": "builtin",
+  "factor_id": "ma_ratio_5_20",
+  "stock_pool": [...],
+  "rebalance_frequency": "weekly",
+  "nav_curve": [{"date": "2026-01-02", "nav": 1000000.0}, ...],
+  "metrics": {
+    "total_return": 0.085, "annualized_return": 0.241,
+    "annualized_volatility": 0.16, "sharpe": 1.51,
+    "sortino": 2.1, "calmar": 0.88, "max_drawdown": -0.27,
+    "win_rate": 0.55, "turnover": 0.12, "cost_drag": 0.0034,
+    "benchmark_return": 0.04, "excess_return": 0.045,
+    "information_ratio": 0.72
+  },
+  "diagnostics": {
+    "data_coverage": {...},
+    "missing_symbols": [], "insufficient_history_symbols": [],
+    "rebalance_count": 17, "lookahead_bias_guard": true,
+    "assumptions": {
+      "commission_bps": 10, "slippage_bps": 5,
+      "rebalance_frequency": "weekly", "allows_short": false,
+      "simulated_short_leg": false, "min_holding_days": 0,
+      "trading_days_per_year": 252, "engine_version": "phase-3"
+    }
+  },
+  "positions": [{"date": "2026-01-09", "weights": {"NVDA": 0.33, ...}, "nav": ..., "cost_deducted": 12.5}, ...],
+  "created_at": "2026-05-01T..."
+}
+```
+
+### `GET /api/v1/quant/backtests/{run_id}` *(Phase 3)*
+
+Fetch a previously-run backtest. Phase 3 caches the **32 most recent**
+results in memory on the running instance (LRU). Returns 404 if the run
+has aged out or the instance restarted. Phase 4+ may add database-backed
+history.
+
 ## Roadmap
 
 | Phase | Feature | Status |
 | --- | --- | --- |
 | P1 | Scaffold + feature flag + status / capabilities endpoints | ✅ shipped |
-| **P2** | **Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator** | ✅ this build |
-| P3 | Research backtest engine (top-k long-only, simulated long-short), Sharpe / Sortino / drawdown / turnover | planned |
+| P2 | Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator | ✅ shipped |
+| **P3** | **Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard** | ✅ this build |
 | P4 | Portfolio optimizer (equal-weight, inverse-vol, max-Sharpe), VaR / CVaR | planned |
 | P5 | AI FactorSpec generation — LLM emits validated JSON only, never Python code | planned |
 | P6 | Agent integration — opt-in tools + skill, default skill set unchanged | planned |
