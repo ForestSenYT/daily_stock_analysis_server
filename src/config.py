@@ -809,6 +809,13 @@ class Config:
     # 返回 ``{"enabled": false, "status": "not_enabled"}``，不影响现有
     # AI 决策回测（``/api/v1/backtest/*``）、Agent、分析主链路。
     quant_research_enabled: bool = False
+
+    # === 输入校验加固（防 LLM 幻觉） ===
+    # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
+    # 都查不到数据时，是否短路——直接拒绝继续分析，避免 LLM 凭训练
+    # 记忆给一个根本不存在的代码（如 typo "APPL" 应为 "AAPL"）编出
+    # 看似专业的报告。默认 True（推荐）。设 false 可恢复旧行为。
+    strict_unknown_stock_guard: bool = True
     
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -1488,6 +1495,7 @@ class Config:
                 minimum=0.0,
             ),
             quant_research_enabled=os.getenv('QUANT_RESEARCH_ENABLED', 'false').lower() == 'true',
+            strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=parse_env_int(os.getenv('MAX_WORKERS'), 3, field_name='MAX_WORKERS', minimum=1),

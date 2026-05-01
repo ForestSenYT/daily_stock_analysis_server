@@ -343,6 +343,7 @@ class StockAnalysisPipeline:
 
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
+            historical_bars: Optional[List[Any]] = None  # hoisted for guard below
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
@@ -360,6 +361,28 @@ class StockAnalysisPipeline:
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
+
+            # ----- Defensive guard: refuse to call LLM when the symbol is
+            # unrecognizable across every data source. Catches typos like
+            # "APPL" (vs "AAPL") that otherwise produce hallucinated
+            # reports based on whatever the LLM remembers from training.
+            # Conservative: requires *all three* primary signals to fail
+            # so a fresh DB / new IPO doesn't accidentally trip it.
+            if self._is_unknown_stock_input(
+                code=code,
+                stock_name=stock_name,
+                realtime_quote=realtime_quote,
+                fundamental_context=fundamental_context,
+                historical_bars=historical_bars,
+            ):
+                logger.error(
+                    "[UnknownStockGuard] %s: realtime/historical/fundamental all empty; "
+                    "refusing to call LLM to avoid hallucinated report. "
+                    "Check STOCK_LIST for typos (e.g. 'APPL' should be 'AAPL').",
+                    code,
+                )
+                self._emit_progress(95, f"{stock_name}：所有数据源无数据，跳过分析")
+                return None
 
             if use_agent:
                 logger.info(f"{stock_name}({code}) 启用 Agent 模式进行分析")
@@ -686,6 +709,65 @@ class StockAnalysisPipeline:
         )
 
         return enhanced
+
+    def _is_unknown_stock_input(
+        self,
+        *,
+        code: str,
+        stock_name: Optional[str],
+        realtime_quote: Optional[Any],
+        fundamental_context: Optional[Dict[str, Any]],
+        historical_bars: Optional[Any],
+    ) -> bool:
+        """Return True when *every* primary data source returned nothing
+        for this code, indicating an invalid / typo'd ticker.
+
+        Designed to short-circuit before the LLM is called, so the model
+        cannot hallucinate a report based on training-data memory of a
+        similarly-spelled real ticker (e.g. user typed "APPL" → LLM
+        confidently produces an analysis of "AAPL" with stale prices).
+
+        Conservative by design: requires all three signals (realtime
+        quote, historical bars, fundamental coverage) to be empty/failed
+        before tripping. A freshly-deployed instance with an empty
+        ``stock_daily`` table will still return False for valid tickers
+        because the realtime branch will succeed.
+
+        Caller can disable via ``Config.strict_unknown_stock_guard=False``.
+        """
+        if not getattr(self.config, "strict_unknown_stock_guard", True):
+            return False
+
+        # Signal 1: any realtime quote at all → real ticker.
+        if realtime_quote is not None:
+            return False
+
+        # Signal 2: any historical OHLCV in our local DB → real ticker.
+        if historical_bars:
+            return False
+
+        # Signal 3: any fundamental block came back with non-failed coverage.
+        if isinstance(fundamental_context, dict):
+            coverage = fundamental_context.get("coverage") or {}
+            if isinstance(coverage, dict):
+                non_failed = [
+                    block
+                    for block, status in coverage.items()
+                    if str(status or "").lower() not in ("", "failed", "not_supported")
+                ]
+                if non_failed:
+                    return False
+
+        # All three failed. Treat as unknown ticker.
+        logger.warning(
+            "[UnknownStockGuard] %s (name=%r): no data anywhere — "
+            "realtime=None, historical_bars=%s, fundamental_coverage=%s",
+            code,
+            stock_name,
+            "empty" if not historical_bars else f"{len(historical_bars)} rows",
+            (fundamental_context or {}).get("coverage"),
+        )
+        return True
 
     def _attach_belong_boards_to_fundamental_context(
         self,
