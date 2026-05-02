@@ -43,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-4-portfolio-lab"
+_CURRENT_PHASE = "phase-5-ai-factor-generation"
 
 
 class QuantResearchService:
@@ -89,17 +89,17 @@ class QuantResearchService:
             status="ready",
             message=(
                 "Quant Research Lab is live. Phase 2 (Factor Lab), "
-                "Phase 3 (Research Backtest Lab), and Phase 4 "
-                "(Portfolio Optimizer + Risk Research) are operational. "
-                "Phase 4 endpoints: POST /api/v1/quant/portfolio/optimize "
-                "suggests target weights from a returns window with "
-                "long-only / floor / ceiling / cash / turnover constraints; "
-                "POST /api/v1/quant/risk/evaluate reports concentration / "
-                "VaR / CVaR / drawdown / volatility / (optional) beta on "
-                "hypothetical weights; GET /api/v1/quant/portfolio/"
-                "current-risk wraps the live PortfolioRiskService. "
-                "AI factor generation and Agent integration are still "
-                "pending in later phases."
+                "Phase 3 (Research Backtest Lab), Phase 4 (Portfolio "
+                "Optimizer + Risk Research), and Phase 5 (AI FactorSpec "
+                "generation) are operational. Phase 5 endpoints: "
+                "POST /api/v1/quant/factors/generate translates a "
+                "natural-language hypothesis into a validated FactorSpec "
+                "JSON (AST-whitelisted expression, scrubbed of unsafe "
+                "marketing phrases); POST /api/v1/quant/factors/"
+                "generate-and-evaluate chains the generator into the "
+                "existing factor evaluator in one round-trip. The LLM "
+                "never emits Python code — only structured FactorSpec. "
+                "Agent integration is still pending in Phase 6."
             ),
             phase=_CURRENT_PHASE,
         )
@@ -174,16 +174,20 @@ class QuantResearchService:
             QuantResearchCapability(
                 name="ai_factor_generation",
                 title="AI FactorSpec Generation",
-                available=False,
+                available=True,
                 phase="phase-5",
                 description=(
                     "Translate a natural-language hypothesis into a "
-                    "FactorSpec JSON, validated by safe_expression before "
-                    "the evaluator runs it. AI never emits or executes "
-                    "Python code directly."
+                    "FactorSpec JSON, validated by safe_expression "
+                    "(AST whitelist) plus a dangerous-phrase scanner "
+                    "before the evaluator runs it. AI never emits or "
+                    "executes Python code directly. The generate-and-"
+                    "evaluate variant chains generation into the "
+                    "Phase-2 evaluator in one call."
                 ),
                 endpoints=[
                     "POST /api/v1/quant/factors/generate",
+                    "POST /api/v1/quant/factors/generate-and-evaluate",
                 ],
                 requires_optional_deps=[],
             ),
@@ -790,3 +794,133 @@ class QuantResearchService:
         if not cols:
             return pd.DataFrame()
         return pd.DataFrame(cols).sort_index()
+
+    # ==================================================================
+    # Phase 5 — AI FactorSpec generation
+    # ==================================================================
+    #
+    # The LLM is the only "untrusted" producer in the lab; every output
+    # passes through ``ai/validators.parse_and_validate`` (JSON shape +
+    # AST whitelist + dangerous-phrase scan) before the evaluator gets
+    # it. ``generate_factor`` returns the spec only; the
+    # ``generate_and_evaluate`` variant feeds the spec into the existing
+    # Phase-2 evaluator in the same round-trip.
+
+    def generate_factor(self, request):
+        """Run an LLM round-trip and return a validated FactorSpec.
+
+        Raises:
+          - ``QuantResearchDisabledError`` when the master flag is off.
+          - ``QuantResearchValidationError`` when the LLM output (or
+            request) fails any layer of validation. The endpoint maps
+            ``error.field`` to the request field where applicable.
+        """
+        from src.quant_research.ai.factor_generator import FactorGenerator
+        from src.quant_research.ai.validators import FactorGenerationError
+        from src.quant_research.factors.builtins import BUILTIN_FACTORS
+        from src.quant_research.schemas import (
+            FactorGenerationResponse,
+            GeneratedFactorSpec,
+        )
+
+        if not self.enabled:
+            raise QuantResearchDisabledError(
+                "Quant Research Lab is disabled."
+            )
+
+        existing = (
+            list(request.existing_factors)
+            if request.existing_factors is not None
+            else sorted(BUILTIN_FACTORS.keys())
+        )
+        try:
+            outcome = FactorGenerator().generate(
+                hypothesis=request.hypothesis,
+                market_scope=request.market_scope,
+                data_window=request.data_window,
+                existing_factors=existing,
+                include_raw=bool(request.include_raw),
+            )
+        except FactorGenerationError as exc:
+            # Surface the stable error ``code`` in the ``field`` slot —
+            # the SPA uses it to render specific guidance (e.g. "the
+            # generated expression was unsafe"), which is more useful
+            # than the raw FactorSpec field name.
+            raise QuantResearchValidationError(
+                str(exc),
+                field=exc.code,
+            ) from exc
+
+        return FactorGenerationResponse(
+            enabled=True,
+            spec=GeneratedFactorSpec(**outcome.spec),
+            model=outcome.model,
+            provider=outcome.provider,
+            usage=outcome.usage,
+            expression_node_count=outcome.expression_node_count,
+            elapsed_ms=outcome.elapsed_ms,
+            raw_response=outcome.raw_response,
+            is_research_only=True,
+        )
+
+    def generate_and_evaluate_factor(self, request):
+        """Generate + evaluate in one call.
+
+        We always emit the ``generation`` block (so the SPA can show
+        the spec even if evaluation later fails on data coverage). If
+        the evaluator raises a *validation* error (bad pool / dates)
+        we re-raise so the API returns 400; if the evaluator raises a
+        non-validation domain error we surface it via diagnostics
+        instead of bubbling a 500 — the spec is still useful research.
+        """
+        from src.quant_research.schemas import (
+            FactorEvaluationRequest,
+            FactorGenerateAndEvaluateResponse,
+            FactorSpec,
+        )
+
+        if not self.enabled:
+            raise QuantResearchDisabledError(
+                "Quant Research Lab is disabled."
+            )
+
+        # Step 1 — generate. Lets QuantResearchValidationError propagate
+        # because a bad spec means we cannot meaningfully evaluate.
+        generation = self.generate_factor(request)
+
+        # Step 2 — evaluate. Reuse the existing path so the evaluator's
+        # safety checks (no-lookahead, AST parse) run again.
+        eval_request = FactorEvaluationRequest(
+            factor=FactorSpec(
+                name=generation.spec.name,
+                expression=generation.spec.expression,
+            ),
+            stocks=list(request.stocks),
+            start_date=request.start_date,
+            end_date=request.end_date,
+            forward_window=request.forward_window,
+            quantile_count=request.quantile_count,
+        )
+
+        diagnostics: list = []
+        evaluation = None
+        try:
+            evaluation = self.evaluate_factor(eval_request)
+        except QuantResearchValidationError:
+            # Validation errors (bad dates / pool / mismatched
+            # expression-vs-inputs) bubble — caller maps to 400.
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception(
+                "generate_and_evaluate: evaluator raised %s", exc
+            )
+            diagnostics.append(
+                f"Evaluation skipped: {type(exc).__name__}: {exc}"
+            )
+
+        return FactorGenerateAndEvaluateResponse(
+            enabled=True,
+            generation=generation,
+            evaluation=evaluation,
+            diagnostics=diagnostics,
+        )

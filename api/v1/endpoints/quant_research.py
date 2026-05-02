@@ -30,6 +30,10 @@ from src.quant_research.errors import (
 from src.quant_research.schemas import (
     FactorEvaluationRequest,
     FactorEvaluationResult,
+    FactorGenerateAndEvaluateRequest,
+    FactorGenerateAndEvaluateResponse,
+    FactorGenerationRequest,
+    FactorGenerationResponse,
     FactorRegistryResponse,
     PortfolioCurrentRiskResult,
     PortfolioOptimizationRequest,
@@ -113,7 +117,7 @@ def quant_capabilities() -> QuantResearchCapabilities:
     ),
 )
 def quant_healthcheck() -> Dict[str, Any]:
-    return {"ok": True, "module": "quant_research", "phase": "phase-2-factor-lab"}
+    return {"ok": True, "module": "quant_research", "phase": "phase-5-ai-factor-generation"}
 
 
 # =====================================================================
@@ -429,6 +433,125 @@ def quant_current_risk() -> PortfolioCurrentRiskResult:
         )
     except QuantResearchError:
         logger.exception("Quant Research current_risk failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+
+
+# =====================================================================
+# Phase 5 — AI FactorSpec generation
+# =====================================================================
+#
+# Both endpoints share the same admin-session protection. The service
+# layer guarantees:
+#   - LLM output is parsed by ``ai/validators.parse_and_validate``
+#     (JSON shape + AST whitelist + dangerous-phrase scan).
+#   - No ``eval`` / ``exec`` is ever invoked on LLM output.
+#   - Generated expressions go through the same Phase-2 evaluator path
+#     as built-in factors when the caller asks for evaluation.
+# A failure at any layer is mapped to a structured 400 with a stable
+# ``error.code`` so the SPA can render specific guidance instead of a
+# generic alert.
+
+@router.post(
+    "/factors/generate",
+    response_model=FactorGenerationResponse,
+    summary="Generate a FactorSpec from a natural-language hypothesis",
+    description=(
+        "The Lab forwards ``hypothesis`` to the configured LLM "
+        "(via the existing LiteLLM Router) and returns a "
+        "validated FactorSpec — never executable Python. The "
+        "response is rejected (400) if the LLM emits Markdown, "
+        "non-JSON, an unsafe expression (anything outside the AST "
+        "whitelist used by built-in factors), or marketing phrases "
+        "promising guaranteed returns / live trading."
+    ),
+    responses={
+        200: {"description": "Validated FactorSpec"},
+        400: {"description": "LLM output failed validation"},
+        503: {
+            "description": (
+                "Lab disabled or no LLM configured "
+                "(``error: llm_unavailable``)."
+            )
+        },
+    },
+)
+def quant_generate_factor(
+    request: FactorGenerationRequest,
+) -> FactorGenerationResponse:
+    try:
+        return _service().generate_factor(request)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchValidationError as exc:
+        # ``field`` carries the FactorGenerationError code for
+        # cases where the LLM produced bad output (e.g. ``unsafe_expression``).
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": _QUANT_VALIDATION_MESSAGE,
+                "field": getattr(exc, "field", None),
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research generate_factor failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+
+
+@router.post(
+    "/factors/generate-and-evaluate",
+    response_model=FactorGenerateAndEvaluateResponse,
+    summary="Generate a FactorSpec and immediately evaluate it",
+    description=(
+        "Single round-trip variant. Runs the LLM → validator pipeline "
+        "first; if the spec passes, feeds the AST-checked expression "
+        "into the existing Phase-2 evaluator on the supplied stock pool "
+        "/ date range. ``generation`` is always populated when the LLM "
+        "returns a valid spec; ``evaluation`` may be ``None`` with a "
+        "diagnostic line if data coverage prevents IC computation."
+    ),
+    responses={
+        200: {"description": "Generation completed (evaluation may be None)"},
+        400: {"description": "Validation error from LLM output or evaluator"},
+        503: {"description": "Lab disabled or no LLM configured"},
+    },
+)
+def quant_generate_and_evaluate_factor(
+    request: FactorGenerateAndEvaluateRequest,
+) -> FactorGenerateAndEvaluateResponse:
+    try:
+        return _service().generate_and_evaluate_factor(request)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": _QUANT_VALIDATION_MESSAGE,
+                "field": getattr(exc, "field", None),
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research generate_and_evaluate failed")
         raise HTTPException(
             status_code=500,
             detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},

@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] Quant Research Lab Phase 2（Factor Lab）：新增 `src/quant_research/factors/` 模块（`safe_expression` AST 白名单、8 个内置因子、`registry`、`evaluator`），新增 `GET /api/v1/quant/factors` 与 `POST /api/v1/quant/factors/evaluate` 接口，输出 IC / RankIC / ICIR / 分组收益 / long-short / turnover / autocorrelation，严格无未来函数。
 - [新功能] 新增防 LLM 代码执行的 AST 白名单评估器 `safe_expression.py`：禁 `eval` / `exec` / `__import__` / 属性访问 / dunder / 未知函数调用；只允许 OHLCV 列引用 + 12 个白名单算子函数。
 - [测试] 新增 `tests/test_quant_research_factors.py` 覆盖危险表达式拒绝（12 条）、合法表达式编译（9 条）、8 个内置因子 smoke、evaluator 端到端（IC 真值 / 缺失股票覆盖率 / 输入校验）。
+- [新功能] Quant Research Lab Phase 5 — AI FactorSpec 生成：新增 `src/quant_research/ai/`（`prompts.py` / `validators.py` / `factor_generator.py`）和两个端点 `POST /api/v1/quant/factors/generate`、`POST /api/v1/quant/factors/generate-and-evaluate`。LLM 复用现有 `LLMToolAdapter`（LiteLLM Router），不新建 provider client；输出走"严格 JSON 解析 → schema/枚举校验 → AST 白名单 + 危险措辞扫描"三层管道，任何失败都映射为带稳定 `error.code` 的 400，AI 永远不会生成或执行 `.py` 代码。
+- [测试] 新增 `tests/test_quant_research_ai.py`（38 例）覆盖 `parse_json_strict` / `validate_factor_spec_shape` / `validate_factor_spec_safety` 各分支、`FactorGenerator` Mock 路径（合法 / Markdown 包裹 / 非 JSON / 危险表达式 / 危险措辞 / LLM 不可用 / provider error / 异常包裹）以及 service + endpoint 在禁用 / 不安全输出下的 503 / 400 行为。
+- [文档] `docs/quant-research-lab.md` 新增 Phase 5 端点契约、三层校验表与错误码列表，刷新 roadmap 状态与 LLM 安全保证。
 
 ## [3.14.2] - 2026-04-30
 

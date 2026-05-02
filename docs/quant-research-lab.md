@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 4 — Portfolio Optimizer & Research Risk** (this build).
+> Status: **Phase 5 — AI FactorSpec Generation** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -308,6 +308,91 @@ Read-only adapter over the live `PortfolioRiskService`. When no
 active account exists, returns `has_live_portfolio: false` so the SPA
 can render an "import a portfolio first" hint instead of an error.
 
+### `POST /api/v1/quant/factors/generate` *(Phase 5)*
+
+Translates a natural-language hypothesis into a validated `FactorSpec`
+JSON. The LLM call goes through the existing `LLMToolAdapter` (LiteLLM
+Router), so all configured fallbacks / API keys / pricing rules are
+reused — no new provider client.
+
+The system prompt makes the contract explicit to the LLM:
+
+1. Output MUST be a single JSON object — no Markdown fences, no prose.
+2. The `expression` field is parsed by the same AST whitelist
+   (`safe_expression.py`) used by built-in factors. `eval` / `exec` /
+   attribute access / dunder names / unknown function calls are
+   rejected.
+3. The model is a *research* assistant — promises of "guaranteed
+   return" / "稳赚" / live-trading instructions are forbidden.
+4. If the request is ambiguous, the LLM may return
+   `{"error": "cannot_generate", "reason": "…"}` instead of guessing.
+
+After the LLM responds, **every** output goes through three layers:
+
+| Layer | What it checks | Error codes |
+| --- | --- | --- |
+| `parse_json_strict` | Single JSON object, no Markdown / multiple roots / non-object | `markdown_wrapper`, `not_a_json_object`, `invalid_json`, `wrong_top_level_type`, `empty_response` |
+| `validate_factor_spec_shape` | 9 required keys, types, lengths, snake_case name, allowed direction / market / inputs | `missing_keys`, `wrong_field_type`, `field_too_long`, `invalid_name`, `value_not_allowed`, `field_out_of_range`, `cannot_generate` |
+| `validate_factor_spec_safety` | AST whitelist on `expression`, dangerous-phrase scan, inputs/expression drift | `unsafe_expression`, `dangerous_phrase`, `inputs_expression_mismatch` |
+
+Any failure raises `400` with `error: quant_research_validation` and
+`field` set to the stable error code (e.g. `unsafe_expression`).
+
+Request:
+```json
+{
+  "hypothesis": "Stocks above their 20-day MA tend to revert; track close/MA-1 as a stretch indicator.",
+  "market_scope": "us",
+  "data_window": 252,
+  "existing_factors": ["return_1d", "ma_ratio_5_20", "rsi_14"]
+}
+```
+
+Response (`FactorGenerationResponse`):
+```json
+{
+  "enabled": true,
+  "spec": {
+    "name": "ma_close_ratio_20",
+    "hypothesis": "...",
+    "inputs": ["close"],
+    "expression": "div(close, mean(close, 20)) - 1",
+    "window": 20,
+    "expected_direction": "negative",
+    "market_scope": "us",
+    "risk_notes": ["Mean reversion can break in trending regimes.", "..."],
+    "validation_plan": ["Compute 5-day forward IC and quintile spreads.", "..."]
+  },
+  "model": "gemini/gemini-2.0-flash",
+  "provider": "gemini",
+  "usage": {"prompt_tokens": 412, "completion_tokens": 148, "total_tokens": 560},
+  "expression_node_count": 11,
+  "elapsed_ms": 1872.4,
+  "is_research_only": true
+}
+```
+
+`include_raw=true` echoes the LLM's raw text for debugging — off by
+default to keep the SPA payload tight.
+
+When no LLM is configured the endpoint returns `503` with `error:
+quant_research_disabled` (the disabled-flag and `llm_unavailable`
+paths share the same status code; the client distinguishes via the
+error body).
+
+### `POST /api/v1/quant/factors/generate-and-evaluate` *(Phase 5)*
+
+One-call variant: generates the spec, then immediately feeds the
+AST-checked expression into the Phase-2 evaluator on the supplied
+stock pool / date range. Reuses the same generation request fields
+plus `stocks` / `start_date` / `end_date` / `forward_window` /
+`quantile_count`.
+
+Response wraps both blocks; if data coverage prevents IC computation
+the endpoint still returns `200` with `evaluation: null` and a
+diagnostic line — the spec itself is still useful research output
+even when the panel is too sparse to evaluate.
+
 ## Roadmap
 
 | Phase | Feature | Status |
@@ -315,8 +400,8 @@ can render an "import a portfolio first" hint instead of an error.
 | P1 | Scaffold + feature flag + status / capabilities endpoints | ✅ shipped |
 | P2 | Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator | ✅ shipped |
 | P3 | Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard | ✅ shipped |
-| **P4** | **Portfolio optimizer (5 algorithms + constraint pipeline), research-risk metrics (concentration / VaR / CVaR / drawdown / vol / beta), live PortfolioRiskService adapter** | ✅ this build |
-| P5 | AI FactorSpec generation — LLM emits validated JSON only, never Python code | planned |
+| P4 | Portfolio optimizer (5 algorithms + constraint pipeline), research-risk metrics (concentration / VaR / CVaR / drawdown / vol / beta), live PortfolioRiskService adapter | ✅ shipped |
+| **P5** | **AI FactorSpec generation — LLM emits a single JSON object, validated by AST whitelist + dangerous-phrase scan; `generate-and-evaluate` chains generation into the Phase-2 evaluator** | ✅ this build |
 | P6 | Agent integration — opt-in tools + skill, default skill set unchanged | planned |
 | P7 | SPA — `/quant` route, factor explorer, backtest result charts (Recharts) | planned |
 
@@ -347,10 +432,14 @@ requires the missing dep.
 - **No live trading.** This module never connects to a broker, sends
   orders, or modifies the existing `portfolio_trades` table. All output
   is `simulated` / `target weights` / `factor scores`.
-- **No code execution from LLM output.** Phase 5 will let an AI propose
-  a `FactorSpec`, but the expression is parsed by an AST whitelist
-  (`safe_expression.py`) before any evaluation. `eval` / `exec` /
-  `__import__` / shell / file / network are forbidden.
+- **No code execution from LLM output.** Phase 5 lets the AI propose a
+  `FactorSpec`, but the `expression` is parsed by the same AST
+  whitelist (`safe_expression.py`) used by built-in factors before any
+  evaluation. `eval` / `exec` / `compile` / attribute access / dunder
+  names / `__import__` / shell / file / network are forbidden. A
+  separate dangerous-phrase scanner rejects "guaranteed return" /
+  "auto-execute" / "broker api" / their Chinese equivalents in the
+  free-text fields. The LLM never emits or runs `.py` files.
 - **No look-ahead bias.** Each evaluator interface explicitly partitions
   signal data (≤ t) and forward-window data (> t); breaching the
   partition fails fast.

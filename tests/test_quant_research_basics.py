@@ -85,7 +85,7 @@ class QuantResearchServiceDisabledFlagTests(unittest.TestCase):
         caps = service.capabilities()
         # Phases that are live in this build. Bump this set each time
         # a phase ships and its capability flips ``available=True``.
-        live_phases = {"phase-2", "phase-3", "phase-4"}
+        live_phases = {"phase-2", "phase-3", "phase-4", "phase-5"}
         for cap in caps.capabilities:
             with self.subTest(capability=cap.name, phase=cap.phase):
                 expected = cap.phase in live_phases

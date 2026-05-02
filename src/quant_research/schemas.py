@@ -551,6 +551,116 @@ class PortfolioRiskResearchResult(BaseModel):
     trade_orders_emitted: bool = False
 
 
+class GeneratedFactorSpec(BaseModel):
+    """Validated FactorSpec returned by ``POST /factors/generate``.
+
+    Mirror of the schema enforced in ``ai/validators.py`` — kept here so
+    OpenAPI / TypeScript clients see the contract. Any change here
+    must be matched in ``REQUIRED_KEYS`` of ``validators.py``.
+    """
+    name: str
+    hypothesis: str
+    inputs: List[str]
+    expression: str
+    window: int
+    expected_direction: str
+    market_scope: str
+    risk_notes: List[str] = Field(default_factory=list)
+    validation_plan: List[str] = Field(default_factory=list)
+
+
+class FactorGenerationRequest(BaseModel):
+    """Body for ``POST /api/v1/quant/factors/generate``.
+
+    The endpoint forwards ``hypothesis`` to the LLM (via the existing
+    ``LLMToolAdapter``); ``existing_factors`` is a soft anti-duplication
+    hint — the LLM is free to ignore it but the prompt nudges away from
+    trivial copies. ``include_raw=true`` echoes the LLM's raw text in
+    the response (debug only; off by default to keep the surface tight).
+    """
+    hypothesis: str = Field(
+        ...,
+        min_length=1, max_length=1000,
+        description="Natural-language research hypothesis.",
+    )
+    market_scope: str = Field(
+        default="all",
+        description="Hint to the LLM: ``cn`` | ``hk`` | ``us`` | ``all``.",
+    )
+    data_window: int = Field(
+        default=252, ge=20, le=2520,
+        description="Informational hint (trading days). Does not bind the LLM.",
+    )
+    existing_factors: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "List of existing built-in factor ids to avoid trivially "
+            "duplicating. ``None`` lets the service fall back to the "
+            "current ``BUILTIN_FACTORS`` keys."
+        ),
+    )
+    include_raw: bool = Field(
+        default=False,
+        description="Echo the raw LLM string for debugging (off by default).",
+    )
+
+
+class FactorGenerationResponse(BaseModel):
+    """Response for ``POST /api/v1/quant/factors/generate``."""
+    enabled: bool = True
+    spec: GeneratedFactorSpec
+    model: str = Field(description="LLM model that produced the spec.")
+    provider: str = Field(description="LiteLLM provider namespace.")
+    usage: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Token usage from the underlying provider, if available.",
+    )
+    expression_node_count: int = Field(
+        description="AST node count of the generated expression (diagnostic).",
+    )
+    elapsed_ms: float = Field(
+        description="Wall-clock LLM call latency in milliseconds.",
+    )
+    raw_response: Optional[str] = Field(
+        default=None,
+        description="Raw LLM output; populated only when include_raw=true.",
+    )
+    is_research_only: bool = True
+
+
+class FactorGenerateAndEvaluateRequest(FactorGenerationRequest):
+    """Body for ``POST /api/v1/quant/factors/generate-and-evaluate``.
+
+    Reuses every field of ``FactorGenerationRequest`` and adds the
+    ``stocks`` / date / window knobs needed for the immediate
+    evaluation. The endpoint runs the LLM once, validates the spec,
+    and (only if validation passes) feeds the AST-checked expression
+    into the existing factor evaluator.
+    """
+    stocks: List[str] = Field(
+        ..., min_length=1, max_length=50,
+        description="Stock pool to evaluate the generated factor on.",
+    )
+    start_date: str = Field(description="ISO date YYYY-MM-DD inclusive.")
+    end_date: str = Field(description="ISO date YYYY-MM-DD inclusive.")
+    forward_window: int = Field(default=5, ge=1, le=60)
+    quantile_count: int = Field(default=5, ge=2, le=10)
+
+
+class FactorGenerateAndEvaluateResponse(BaseModel):
+    """Response wraps both the generated spec and its evaluation result.
+
+    Either both fields are populated (happy path) or ``evaluation`` is
+    ``None`` and ``diagnostics`` carries the reason — typically a
+    coverage / data-load issue that the spec validation alone wouldn't
+    have caught.
+    """
+    enabled: bool = True
+    generation: FactorGenerationResponse
+    evaluation: Optional[FactorEvaluationResult] = None
+    diagnostics: List[str] = Field(default_factory=list)
+
+
 class PortfolioCurrentRiskResult(BaseModel):
     """Thin adapter response for ``GET /api/v1/quant/portfolio/current-risk``.
 
