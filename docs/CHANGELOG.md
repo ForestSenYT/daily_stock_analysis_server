@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增可选技能 `strategies/quant_research/SKILL.md`：`default-active=false`、`default-router=false`、`user-invocable=true`，规定"先提假设 → 因子探索 → IC 评估 → 研究回测 → 风险复核 → 输出研究免责"工作流；不替代 `bull_trend` 等默认策略，不改变默认 `/chat` 行为。
 - [改进] `api/v1/endpoints/agent.py` `TOOL_DISPLAY_NAMES` 追加五个量化工具的中文名（列出量化因子 / 评估量化因子 / 运行研究回测 / 获取研究回测结果 / 评估组合研究风险），不改既有顺序。
 - [测试] 新增 `tests/test_quant_research_agent_integration.py` 覆盖 ToolRegistry 暴露顺序、feature flag 关闭时各工具 not_enabled、安全边界（互斥参数、stock pool / 风险符号上限、`run_id` 必填）、SkillManager 加载 `quant_research` 且不进入 default-active 集合、`/api/v1/agent/skills` 返回中文显示名、TOOL_DISPLAY_NAMES 完整覆盖。
+- [新功能] Quant Research Lab Phase 7 — Web 工作台：新增 `apps/dsa-web/src/pages/QuantResearchPage.tsx`（双 Tab：Factor Lab + Research Backtest）、`apps/dsa-web/src/api/quantResearch.ts`（封装 `/api/v1/quant/status` / `/capabilities` / `/factors` / `/factors/evaluate` / `/backtests/run`）、`apps/dsa-web/src/types/quantResearch.ts` 类型定义；在 `App.tsx` 注册 `/quant` 路由并在 `SidebarNav` 增加「量化研究」入口（`FlaskConical` 图标），其余 5 个路由（`/`、`/chat`、`/portfolio`、`/backtest`、`/settings`）行为与默认 skill 不变。
+- [改进] 量化研究页面复用现有 `Shell` / `AuthProvider` / 主题与 `apiClient`（含 401 重定向、camelCase 转换、`ParsedApiError` 解析），不新增第二套路由 / 鉴权 / HTTP 客户端；使用 Recharts 渲染 IC 序列、分位收益、净值曲线、回撤曲线和最近调仓权重饼图，每个图表均提供空状态降级；所有运行入口在 `QUANT_RESEARCH_ENABLED=false` 时显示「未启用」横幅并禁用按钮，错误统一通过 `ApiErrorAlert` 展示而非吞掉。
+- [改进] 在量化研究页面顶部固定渲染「研究专用 · 非投资建议」黄色提示，分位多空策略权重表格额外标注"负权重为模拟空头腿，仅作为研究分析口径，不会下单"，明确边界。
 
 ## [3.14.2] - 2026-04-30
 

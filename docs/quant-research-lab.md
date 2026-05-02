@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 6 — Agent Integration** (this build).
+> Status: **Phase 7 — Web Workbench** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -456,6 +456,39 @@ Existing callers who don't pass `skills` see no change — the default
 skill set, default `/chat` routing, default analysis prompts, and the
 existing 18-tool order are all preserved.
 
+## Web workbench *(Phase 7)*
+
+Phase 7 ships a single-page workbench at **`/quant`** that drives the
+existing API surface — there is no parallel routing, no parallel
+HTTP client, and the rest of the SPA is untouched.
+
+| File | Purpose |
+| --- | --- |
+| `apps/dsa-web/src/pages/QuantResearchPage.tsx` | One page with two tabs: **Factor Lab · 因子评估** and **Research Backtest · 研究回测**. |
+| `apps/dsa-web/src/api/quantResearch.ts` | Thin axios wrapper around the existing shared `apiClient` (`/api/v1/quant/status` / `/capabilities` / `/factors` / `/factors/evaluate` / `/backtests/run`). camelCase out, snake_case in. |
+| `apps/dsa-web/src/types/quantResearch.ts` | TS types mirroring `src/quant_research/schemas.py`. |
+| `apps/dsa-web/src/App.tsx` | Adds `<Route path="/quant" element={<QuantResearchPage />} />` inside the existing `<Shell>`. |
+| `apps/dsa-web/src/components/layout/SidebarNav.tsx` | Adds 「量化研究」 nav entry (`FlaskConical` icon) between Backtest and Settings. |
+
+What the page renders:
+
+- **Status banner** — Hits `GET /quant/status` on mount; shows the live phase string in a green badge when enabled, or a yellow "未启用" badge with operator instructions when off.
+- **Always-on disclaimer** — A persistent yellow `InlineAlert` reading "研究专用 · 非投资建议", reminding the user the lab does not place orders or write portfolio trades.
+- **Factor Lab tab** — Stock pool input, date range, factor source toggle (built-in / safe-expression), forward window, quantile count → posts to `POST /factors/evaluate`. Charts: IC + RankIC line series, quantile-return bars, KPI cards for IC mean / std / ICIR / RankIC mean / long-short spread / turnover / autocorrelation, plus a coverage report.
+- **Research Backtest tab** — Strategy + rebalance frequency selectors, factor source toggle, top-K / quantile inputs, initial cash, commission_bps, slippage_bps, optional benchmark → posts to `POST /backtests/run`. Charts: NAV area chart, drawdown area chart (peak-to-trough), latest rebalance weight pie + table. Negative weights are explicitly tagged as "模拟空头腿，不会下单".
+
+Disabled / loading / error policy:
+
+- When the lab is disabled (`status.enabled === false`), the run buttons are disabled and a `not_enabled` banner is rendered — no requests are sent.
+- All `POST` errors flow through the shared `getParsedApiError` and are surfaced via `ApiErrorAlert`. Validation errors from the backend (factor mutual-exclusivity, date range, AST whitelist) appear inline on the same form.
+- 401 responses still hit the shared axios interceptor and redirect to `/login` like the rest of the app.
+
+The page does **not** add any new dependency: it reuses the existing
+`recharts`, `axios`, `react-router-dom`, `clsx`, and the in-house
+`Card` / `SectionCard` / `EmptyState` / `InlineAlert` / `Button` /
+`Badge` / `Select` / `PageHeader` / `AppPage` / `ApiErrorAlert`
+components.
+
 ## Roadmap
 
 | Phase | Feature | Status |
@@ -465,8 +498,8 @@ existing 18-tool order are all preserved.
 | P3 | Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard | ✅ shipped |
 | P4 | Portfolio optimizer (5 algorithms + constraint pipeline), research-risk metrics (concentration / VaR / CVaR / drawdown / vol / beta), live PortfolioRiskService adapter | ✅ shipped |
 | P5 | AI FactorSpec generation — LLM emits a single JSON object, validated by AST whitelist + dangerous-phrase scan; `generate-and-evaluate` chains generation into the Phase-2 evaluator | ✅ shipped |
-| **P6** | **Agent integration — 5 opt-in tools registered in the existing `ToolRegistry`; opt-in `quant_research` skill (default-active=false, user-invocable=true); AGENT/CHAT prompts and default skill set unchanged** | ✅ this build |
-| P7 | SPA — `/quant` route, factor explorer, backtest result charts (Recharts) | planned |
+| P6 | Agent integration — 5 opt-in tools registered in the existing `ToolRegistry`; opt-in `quant_research` skill (default-active=false, user-invocable=true); AGENT/CHAT prompts and default skill set unchanged | ✅ shipped |
+| **P7** | **SPA — `/quant` route with two tabs (Factor Lab + Research Backtest), Recharts visualizations (IC series / quantile bars / NAV curve / drawdown / weight pie), reuses existing Shell + AuthProvider + apiClient; default routes unchanged** | ✅ this build |
 
 ## Configuration
 
