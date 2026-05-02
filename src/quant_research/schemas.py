@@ -417,3 +417,151 @@ class ResearchBacktestResult(BaseModel):
     diagnostics: ResearchBacktestDiagnostics
     positions: List[ResearchBacktestPositionSnapshot]
     created_at: str
+
+
+# =====================================================================
+# Phase 4: Portfolio Optimizer + Research Risk
+# =====================================================================
+
+class RiskBudgetConstraint(BaseModel):
+    """Optional risk-budget allocation per name. Phase 4 ships this
+    schema for future use; the optimizer currently routes any
+    ``risk_budget_placeholder`` request to ``not_supported``.
+    """
+    symbol: str = Field(description="Stock code")
+    target_risk_share_pct: float = Field(
+        ge=0.0, le=100.0,
+        description="Fraction of portfolio variance this name should contribute (%)",
+    )
+
+
+class PortfolioOptimizationRequest(BaseModel):
+    """Body for ``POST /api/v1/quant/portfolio/optimize``.
+
+    The endpoint loads each symbol's daily history via
+    ``load_history_df``, builds a returns matrix on the
+    [start_date, end_date] window, and dispatches to the requested
+    objective. ``current_weights`` lets the engine respect a
+    ``max_turnover`` ceiling vs. the user's existing book.
+    """
+    objective: str = Field(
+        description=(
+            "One of: equal_weight | inverse_volatility | "
+            "max_sharpe_simplified | min_variance_simplified | "
+            "risk_budget_placeholder."
+        ),
+    )
+    symbols: List[str] = Field(
+        min_length=1, max_length=50,
+        description="Investment universe — endpoint enforces ≤ 50.",
+    )
+    start_date: str = Field(description="ISO date for returns window start")
+    end_date: str = Field(description="ISO date for returns window end")
+    long_only: bool = Field(default=True)
+    min_weight_per_symbol: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_weight_per_symbol: float = Field(default=1.0, ge=0.0, le=1.0)
+    cash_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_turnover: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    current_weights: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Current weights for max_turnover blending (research only).",
+    )
+    sector_exposure_limit: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Per-sector cap (e.g. {'tech': 0.4}). Phase 4 returns "
+            "partial_coverage because no sector taxonomy is shipped."
+        ),
+    )
+    risk_budget: Optional[List[RiskBudgetConstraint]] = Field(
+        default=None,
+        description="Reserved for future risk-parity solver.",
+    )
+
+
+class PortfolioOptimizationResult(BaseModel):
+    """Response for ``POST /api/v1/quant/portfolio/optimize``."""
+    enabled: bool = True
+    status: str = Field(
+        description=(
+            "ok | not_supported | insufficient_data | infeasible_constraints"
+        ),
+    )
+    objective: str
+    symbols: List[str]
+    weights: Dict[str, float] = Field(
+        description="Target weights per symbol (research only — never sent as orders).",
+    )
+    cash_weight: float
+    expected_annual_return: Optional[float] = None
+    expected_annual_volatility: Optional[float] = None
+    diagnostics: List[str] = Field(default_factory=list)
+    assumptions: Dict[str, Any] = Field(default_factory=dict)
+    is_research_only: bool = True
+    trade_orders_emitted: bool = False
+
+
+class PortfolioRiskResearchRequest(BaseModel):
+    """Body for ``POST /api/v1/quant/risk/evaluate``.
+
+    The caller supplies a hypothetical portfolio (weights) and a stock
+    pool over [start_date, end_date]; the endpoint loads daily returns
+    for each symbol and computes concentration / VaR / CVaR / drawdown /
+    volatility / (optional) beta.
+    """
+    weights: Dict[str, float] = Field(
+        description="Symbol → target weight (signed for short legs).",
+    )
+    start_date: str = Field(description="ISO date for returns window start")
+    end_date: str = Field(description="ISO date for returns window end")
+    benchmark_symbol: Optional[str] = Field(
+        default=None,
+        description="Optional benchmark ticker for beta computation.",
+    )
+    var_confidence: float = Field(
+        default=0.95, gt=0.0, lt=1.0,
+        description="Confidence level for historical VaR / CVaR.",
+    )
+    concentration_threshold_pct: float = Field(
+        default=35.0, ge=0.0, le=100.0,
+        description="Single-name weight % above which a symbol triggers an alert.",
+    )
+
+
+class PortfolioRiskResearchResult(BaseModel):
+    """Response for ``POST /api/v1/quant/risk/evaluate``."""
+    enabled: bool = True
+    weights: Dict[str, float]
+    daily_observation_count: int
+    concentration: Dict[str, Any]
+    sector_concentration_status: str = Field(
+        default="not_supported",
+        description="Phase 4 has no sector taxonomy; field reserved.",
+    )
+    volatility: Dict[str, Optional[float]]
+    drawdown: Dict[str, Optional[float]]
+    var_confidence: float
+    historical_var: Optional[float]
+    historical_cvar: Optional[float]
+    beta: Optional[float]
+    beta_status: str
+    diagnostics: List[str] = Field(default_factory=list)
+    assumptions: Dict[str, Any] = Field(default_factory=dict)
+    is_research_only: bool = True
+    trade_orders_emitted: bool = False
+
+
+class PortfolioCurrentRiskResult(BaseModel):
+    """Thin adapter response for ``GET /api/v1/quant/portfolio/current-risk``.
+
+    Delegates to the existing ``PortfolioRiskService.get_risk_report()``
+    and surfaces it under the quant-research namespace so the SPA can
+    render live + research views in one page.
+    """
+    enabled: bool = True
+    has_live_portfolio: bool
+    risk_report: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Pass-through of PortfolioRiskService.get_risk_report() output.",
+    )
+    diagnostics: List[str] = Field(default_factory=list)

@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 3 — Research Backtest Lab** (this build).
+> Status: **Phase 4 — Portfolio Optimizer & Research Risk** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -264,14 +264,58 @@ results in memory on the running instance (LRU). Returns 404 if the run
 has aged out or the instance restarted. Phase 4+ may add database-backed
 history.
 
+### `POST /api/v1/quant/portfolio/optimize` *(Phase 4)*
+
+Suggest target weights for a stock pool. Five lightweight algorithms
+(no convex solver, no scipy.optimize):
+
+- `equal_weight` — equal weight across all symbols.
+- `inverse_volatility` — `wᵢ ∝ 1/σᵢ`, normalised.
+- `max_sharpe_simplified` — `wᵢ ∝ μᵢ/σᵢ²`, long-only clamp; not the
+  textbook tangency portfolio (no riskless rate, no full inverse cov).
+- `min_variance_simplified` — diagonal-cov approximation: `wᵢ ∝ 1/σᵢ²`.
+- `risk_budget_placeholder` — declared, returns `not_supported` until
+  a risk-parity solver ships in a later phase.
+
+Constraint pipeline (applied in order): `long_only` → `min_weight_per_symbol`
+→ `max_weight_per_symbol` → `cash_weight` → `max_turnover`.
+`sector_exposure_limit` is accepted but returns `partial_coverage` —
+no sector taxonomy ships in this build.
+
+Hard limits: `symbols ≤ 50`, `(end - start) ≤ 730 days`. Output is
+**research-only target weights**; the response always carries
+`is_research_only=true` and `trade_orders_emitted=false`.
+
+### `POST /api/v1/quant/risk/evaluate` *(Phase 4)*
+
+Evaluate research risk on a hypothetical set of weights over the
+returns window. Computes:
+
+- Single-name concentration + Herfindahl-Hirschman index.
+- Daily and annualised volatility.
+- Peak-to-trough max drawdown (cumulative-return view).
+- Historical empirical 1-day VaR and CVaR (default confidence 0.95;
+  needs ≥ 20 observations).
+- OLS beta vs an optional `benchmark_symbol` (needs ≥ 30 paired
+  observations; missing benchmark returns `beta_status: not_supported`).
+
+Sector-level concentration is reserved (`sector_concentration_status:
+not_supported`).
+
+### `GET /api/v1/quant/portfolio/current-risk` *(Phase 4)*
+
+Read-only adapter over the live `PortfolioRiskService`. When no
+active account exists, returns `has_live_portfolio: false` so the SPA
+can render an "import a portfolio first" hint instead of an error.
+
 ## Roadmap
 
 | Phase | Feature | Status |
 | --- | --- | --- |
 | P1 | Scaffold + feature flag + status / capabilities endpoints | ✅ shipped |
 | P2 | Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator | ✅ shipped |
-| **P3** | **Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard** | ✅ this build |
-| P4 | Portfolio optimizer (equal-weight, inverse-vol, max-Sharpe), VaR / CVaR | planned |
+| P3 | Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard | ✅ shipped |
+| **P4** | **Portfolio optimizer (5 algorithms + constraint pipeline), research-risk metrics (concentration / VaR / CVaR / drawdown / vol / beta), live PortfolioRiskService adapter** | ✅ this build |
 | P5 | AI FactorSpec generation — LLM emits validated JSON only, never Python code | planned |
 | P6 | Agent integration — opt-in tools + skill, default skill set unchanged | planned |
 | P7 | SPA — `/quant` route, factor explorer, backtest result charts (Recharts) | planned |

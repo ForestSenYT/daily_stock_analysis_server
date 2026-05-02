@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
+- [新功能] Quant Research Lab Phase 4 — Portfolio Optimizer & Risk Research：新增 `src/quant_research/portfolio/`（optimizer + risk）、3 个 API（`POST /api/v1/quant/portfolio/optimize`、`POST /api/v1/quant/risk/evaluate`、`GET /api/v1/quant/portfolio/current-risk`）。优化器支持 equal_weight / inverse_volatility / max_sharpe_simplified / min_variance_simplified / risk_budget_placeholder 五种目标，配合 long_only / weight floor / weight ceiling / cash / turnover 约束流水线；风险评估支持 concentration / VaR / CVaR / drawdown / volatility / beta；current-risk 复用已有 `PortfolioRiskService`。所有输出均为研究建议（`is_research_only=true` / `trade_orders_emitted=false`），不写入任何持仓事件。
+- [测试] 新增 `tests/test_quant_research_portfolio.py`（25 例）覆盖 5 种优化算法、约束流水线、concentration / VaR / CVaR / drawdown / volatility / beta、研究风险整体打包、研究专用断言。
+- [文档] `docs/quant-research-lab.md` 更新 Phase 4 章节、roadmap 状态、3 个新端点契约。
 - [新功能] Quant Research Lab 基础设施落地：feature flag `QUANT_RESEARCH_ENABLED`（默认 false）、独立模块 `src/quant_research/`、API `/api/v1/quant/status` 与 `/api/v1/quant/capabilities`，与现有 `/api/v1/backtest/*` AI 决策回测语义完全分开。
 - [文档] 新增 `docs/quant-research-lab.md` 描述模块定位、与现有回测的边界、9 阶段路线图与安全保证。
 - [chore] 新增 `requirements-quant.txt` 作为可选量化依赖清单（默认不安装，不影响 Cloud Run 镜像体积）。

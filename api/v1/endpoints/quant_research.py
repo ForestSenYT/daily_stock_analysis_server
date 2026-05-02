@@ -31,6 +31,11 @@ from src.quant_research.schemas import (
     FactorEvaluationRequest,
     FactorEvaluationResult,
     FactorRegistryResponse,
+    PortfolioCurrentRiskResult,
+    PortfolioOptimizationRequest,
+    PortfolioOptimizationResult,
+    PortfolioRiskResearchRequest,
+    PortfolioRiskResearchResult,
     QuantResearchCapabilities,
     QuantResearchStatus,
     ResearchBacktestRequest,
@@ -288,3 +293,143 @@ def quant_get_backtest(run_id: str) -> ResearchBacktestResult:
             },
         )
     return result
+
+
+# =====================================================================
+# Phase 4 — Portfolio Optimizer + Research Risk
+# =====================================================================
+#
+# All three endpoints are admin-session protected (mounted under
+# ``/api/v1/quant/*`` which the AuthMiddleware covers). They never emit
+# trade orders; ``current-risk`` is a thin pass-through to the existing
+# PortfolioRiskService for the live-portfolio dashboard.
+
+@router.post(
+    "/portfolio/optimize",
+    response_model=PortfolioOptimizationResult,
+    summary="Suggest target weights for a stock pool (research only)",
+    description=(
+        "Run one of five lightweight optimizers (equal_weight / "
+        "inverse_volatility / max_sharpe_simplified / "
+        "min_variance_simplified / risk_budget_placeholder) on a stock "
+        "pool over the supplied returns window. Returns *target weights* "
+        "as a research suggestion — never an order. Constraints: "
+        "long_only, min/max weight per symbol, cash_weight, max_turnover. "
+        "sector_exposure_limit is accepted but returns "
+        "``partial_coverage`` because no sector taxonomy is shipped."
+    ),
+    responses={
+        200: {"description": "Optimization completed (status field disambiguates outcomes)"},
+        400: {"description": "Invalid input"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_optimize_portfolio(
+    request: PortfolioOptimizationRequest,
+) -> PortfolioOptimizationResult:
+    try:
+        return _service().optimize_portfolio(request)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": _QUANT_VALIDATION_MESSAGE,
+                "field": getattr(exc, "field", None),
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research optimize_portfolio failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+
+
+@router.post(
+    "/risk/evaluate",
+    response_model=PortfolioRiskResearchResult,
+    summary="Evaluate research risk on hypothetical weights",
+    description=(
+        "Compute concentration, historical VaR / CVaR, drawdown, "
+        "volatility, and (optional) beta on a *hypothetical* set of "
+        "weights over the supplied returns window. Does NOT touch "
+        "the live portfolio. ``benchmark_symbol`` is optional — "
+        "missing benchmark returns ``beta_status: not_supported``."
+    ),
+    responses={
+        200: {"description": "Risk evaluated"},
+        400: {"description": "Invalid input"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_evaluate_risk(
+    request: PortfolioRiskResearchRequest,
+) -> PortfolioRiskResearchResult:
+    try:
+        return _service().evaluate_research_risk(request)
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "quant_research_validation",
+                "message": _QUANT_VALIDATION_MESSAGE,
+                "field": getattr(exc, "field", None),
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research evaluate_research_risk failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )
+
+
+@router.get(
+    "/portfolio/current-risk",
+    response_model=PortfolioCurrentRiskResult,
+    summary="Live portfolio risk view (delegates to PortfolioRiskService)",
+    description=(
+        "Adapter for the live portfolio's risk report. When no active "
+        "account exists, returns ``has_live_portfolio: false`` instead "
+        "of erroring — the SPA renders an 'import a portfolio first' "
+        "hint. Read-only; does not modify any portfolio state."
+    ),
+    responses={
+        200: {"description": "Risk report (or empty when no live portfolio)"},
+        503: {"description": "Quant Research Lab disabled"},
+    },
+)
+def quant_current_risk() -> PortfolioCurrentRiskResult:
+    try:
+        return _service().current_risk()
+    except QuantResearchDisabledError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "quant_research_disabled",
+                "message": _QUANT_DISABLED_MESSAGE,
+            },
+        )
+    except QuantResearchError:
+        logger.exception("Quant Research current_risk failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "quant_research_error", "message": _QUANT_ERROR_MESSAGE},
+        )

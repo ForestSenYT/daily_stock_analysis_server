@@ -43,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-3-backtest-lab"
+_CURRENT_PHASE = "phase-4-portfolio-lab"
 
 
 class QuantResearchService:
@@ -88,16 +88,18 @@ class QuantResearchService:
             enabled=True,
             status="ready",
             message=(
-                "Quant Research Lab is live. Phase 2 (Factor Lab) and "
-                "Phase 3 (Research Backtest Lab) are operational: "
-                "GET /api/v1/quant/factors lists built-in factors, "
-                "POST /api/v1/quant/factors/evaluate runs IC/RankIC/"
-                "quantile-return analysis, POST /api/v1/quant/backtests/run "
-                "simulates factor strategies (top-k long-only / "
-                "quantile long-short / equal-weight baseline) with "
-                "Sharpe / Sortino / drawdown / turnover / IR metrics. "
-                "Portfolio optimization, AI factor generation, and "
-                "Agent integration are still pending in later phases."
+                "Quant Research Lab is live. Phase 2 (Factor Lab), "
+                "Phase 3 (Research Backtest Lab), and Phase 4 "
+                "(Portfolio Optimizer + Risk Research) are operational. "
+                "Phase 4 endpoints: POST /api/v1/quant/portfolio/optimize "
+                "suggests target weights from a returns window with "
+                "long-only / floor / ceiling / cash / turnover constraints; "
+                "POST /api/v1/quant/risk/evaluate reports concentration / "
+                "VaR / CVaR / drawdown / volatility / (optional) beta on "
+                "hypothetical weights; GET /api/v1/quant/portfolio/"
+                "current-risk wraps the live PortfolioRiskService. "
+                "AI factor generation and Agent integration are still "
+                "pending in later phases."
             ),
             phase=_CURRENT_PHASE,
         )
@@ -148,19 +150,26 @@ class QuantResearchService:
             QuantResearchCapability(
                 name="portfolio_optimization",
                 title="Portfolio Optimization & Risk Research",
-                available=False,
+                available=True,
                 phase="phase-4",
                 description=(
-                    "Suggest target weights via equal-weight, "
-                    "inverse-volatility, simplified max-sharpe / min-variance. "
-                    "Reuses the existing PortfolioRiskService for "
-                    "concentration and drawdown computations."
+                    "Five lightweight optimizers (equal_weight, "
+                    "inverse_volatility, max_sharpe_simplified, "
+                    "min_variance_simplified, risk_budget_placeholder) "
+                    "with constraint pipeline (long_only / weight floor "
+                    "/ ceiling / cash / turnover). Standalone research "
+                    "risk on hypothetical weights: concentration, VaR, "
+                    "CVaR, drawdown, volatility, beta. The "
+                    "current-risk endpoint delegates to the existing "
+                    "PortfolioRiskService for live-portfolio dashboards. "
+                    "All output is research-only — no orders are emitted."
                 ),
                 endpoints=[
                     "POST /api/v1/quant/portfolio/optimize",
                     "POST /api/v1/quant/risk/evaluate",
+                    "GET  /api/v1/quant/portfolio/current-risk",
                 ],
-                requires_optional_deps=["riskfolio-lib (optional)", "PyPortfolioOpt (optional)"],
+                requires_optional_deps=[],
             ),
             QuantResearchCapability(
                 name="ai_factor_generation",
@@ -527,3 +536,257 @@ class QuantResearchService:
                 "Quant Research Lab is disabled."
             )
         return self._cache().get(run_id)
+
+    # ==================================================================
+    # Phase 4 — Portfolio Optimizer + Research Risk
+    # ==================================================================
+    #
+    # Research-only methods. They never touch ``portfolio_trades``,
+    # never emit orders, and never modify the live portfolio. The
+    # ``current_risk()`` adapter delegates to the existing
+    # ``PortfolioRiskService`` for live-portfolio dashboards but does
+    # so via a read-only snapshot.
+
+    def optimize_portfolio(self, request):
+        """Run the lightweight optimizer on a stock pool over the
+        supplied returns window. Returns a Pydantic
+        ``PortfolioOptimizationResult``."""
+        from datetime import date as _date
+
+        from src.quant_research.portfolio import (
+            PortfolioOptimizerInputs,
+            optimize_portfolio as _optimize,
+        )
+        from src.quant_research.schemas import PortfolioOptimizationResult
+
+        if not self.enabled:
+            raise QuantResearchDisabledError("Quant Research Lab is disabled.")
+
+        # Defensive validation.
+        symbols = list(dict.fromkeys(request.symbols or []))  # dedup, preserve order
+        if not symbols:
+            raise QuantResearchValidationError(
+                "symbols must not be empty.", field="symbols",
+            )
+        if len(symbols) > 50:
+            raise QuantResearchValidationError(
+                "symbols too long (max 50).", field="symbols",
+            )
+        try:
+            start = _date.fromisoformat(request.start_date)
+            end = _date.fromisoformat(request.end_date)
+        except Exception as exc:
+            raise QuantResearchValidationError(
+                f"start_date/end_date must be ISO YYYY-MM-DD: {exc}",
+                field="start_date" if "start" in str(exc).lower() else "end_date",
+            )
+        if start > end:
+            raise QuantResearchValidationError(
+                "start_date must be ≤ end_date.", field="start_date",
+            )
+        if (end - start).days > 730:
+            raise QuantResearchValidationError(
+                "(end_date - start_date) must be ≤ 730 days.", field="end_date",
+            )
+        if request.min_weight_per_symbol > request.max_weight_per_symbol:
+            raise QuantResearchValidationError(
+                "min_weight_per_symbol must be ≤ max_weight_per_symbol.",
+                field="min_weight_per_symbol",
+            )
+
+        # Load returns matrix (reuse the same loader as the backtest engine).
+        returns_panel = self._build_returns_panel(symbols, start, end)
+        inputs = PortfolioOptimizerInputs(
+            objective=request.objective,
+            symbols=symbols,
+            returns_panel=returns_panel,
+            long_only=request.long_only,
+            min_weight_per_symbol=request.min_weight_per_symbol,
+            max_weight_per_symbol=request.max_weight_per_symbol,
+            cash_weight=request.cash_weight,
+            max_turnover=request.max_turnover,
+            current_weights=request.current_weights,
+            sector_exposure_limit=request.sector_exposure_limit,
+        )
+        try:
+            output = _optimize(inputs)
+        except ValueError as exc:
+            raise QuantResearchValidationError(str(exc), field="objective")
+
+        return PortfolioOptimizationResult(
+            enabled=True,
+            status=output.status,
+            objective=output.objective,
+            symbols=symbols,
+            weights=output.weights,
+            cash_weight=output.cash_weight,
+            expected_annual_return=output.expected_annual_return,
+            expected_annual_volatility=output.expected_annual_volatility,
+            diagnostics=list(output.diagnostics),
+            assumptions=dict(output.assumptions),
+            is_research_only=True,
+            trade_orders_emitted=False,
+        )
+
+    def evaluate_research_risk(self, request):
+        """Run standalone risk evaluation on user-supplied weights +
+        a returns window. Returns a Pydantic
+        ``PortfolioRiskResearchResult``."""
+        from datetime import date as _date
+
+        from src.quant_research.portfolio import (
+            ResearchRiskInputs,
+            evaluate_research_risk as _evaluate,
+        )
+        from src.quant_research.schemas import PortfolioRiskResearchResult
+
+        if not self.enabled:
+            raise QuantResearchDisabledError("Quant Research Lab is disabled.")
+
+        if not request.weights:
+            raise QuantResearchValidationError(
+                "weights must not be empty.", field="weights",
+            )
+        if len(request.weights) > 50:
+            raise QuantResearchValidationError(
+                "weights too long (max 50 symbols).", field="weights",
+            )
+        try:
+            start = _date.fromisoformat(request.start_date)
+            end = _date.fromisoformat(request.end_date)
+        except Exception as exc:
+            raise QuantResearchValidationError(
+                f"start_date/end_date must be ISO YYYY-MM-DD: {exc}",
+            )
+        if start > end:
+            raise QuantResearchValidationError(
+                "start_date must be ≤ end_date.", field="start_date",
+            )
+        if (end - start).days > 730:
+            raise QuantResearchValidationError(
+                "(end_date - start_date) must be ≤ 730 days.", field="end_date",
+            )
+
+        symbols = list(request.weights.keys())
+        returns_panel = self._build_returns_panel(symbols, start, end)
+        bench_returns = None
+        if request.benchmark_symbol:
+            bench_panel = self._build_returns_panel(
+                [request.benchmark_symbol], start, end,
+            )
+            if request.benchmark_symbol in bench_panel.columns:
+                bench_returns = bench_panel[request.benchmark_symbol].dropna()
+
+        inputs = ResearchRiskInputs(
+            weights=request.weights,
+            returns_panel=returns_panel,
+            benchmark_returns=bench_returns,
+            var_confidence=request.var_confidence,
+            concentration_threshold_pct=request.concentration_threshold_pct,
+        )
+        result = _evaluate(inputs)
+        return PortfolioRiskResearchResult(
+            enabled=True,
+            weights=dict(result.weights),
+            daily_observation_count=result.daily_observation_count,
+            concentration=dict(result.concentration),
+            sector_concentration_status=result.sector_concentration_status,
+            volatility=dict(result.volatility),
+            drawdown=dict(result.drawdown),
+            var_confidence=result.var_confidence,
+            historical_var=result.historical_var,
+            historical_cvar=result.historical_cvar,
+            beta=result.beta,
+            beta_status=result.beta_status,
+            diagnostics=list(result.diagnostics),
+            assumptions=dict(result.assumptions),
+            is_research_only=True,
+            trade_orders_emitted=False,
+        )
+
+    def current_risk(self):
+        """Live-portfolio research view. Delegates to the existing
+        ``PortfolioRiskService.get_risk_report()`` so the dashboard
+        shares one source of truth.
+
+        When no live portfolio exists (no accounts), returns
+        ``has_live_portfolio=False`` instead of erroring — the SPA
+        renders an "import a portfolio first" hint."""
+        from src.quant_research.schemas import PortfolioCurrentRiskResult
+
+        if not self.enabled:
+            raise QuantResearchDisabledError("Quant Research Lab is disabled.")
+
+        try:
+            from src.services.portfolio_service import PortfolioService
+            from src.services.portfolio_risk_service import PortfolioRiskService
+
+            portfolio_svc = PortfolioService()
+            accounts = portfolio_svc.list_accounts(include_inactive=False)
+            if not accounts:
+                return PortfolioCurrentRiskResult(
+                    enabled=True,
+                    has_live_portfolio=False,
+                    risk_report=None,
+                    diagnostics=[
+                        "No active portfolio accounts; "
+                        "import via /api/v1/portfolio/* first."
+                    ],
+                )
+            risk_svc = PortfolioRiskService(portfolio_svc)
+            report = risk_svc.get_risk_report()
+            return PortfolioCurrentRiskResult(
+                enabled=True,
+                has_live_portfolio=True,
+                risk_report=report,
+                diagnostics=[],
+            )
+        except Exception as exc:
+            logger.exception("current_risk delegation failed: %s", exc)
+            return PortfolioCurrentRiskResult(
+                enabled=True,
+                has_live_portfolio=False,
+                risk_report=None,
+                diagnostics=[
+                    f"PortfolioRiskService unavailable: {type(exc).__name__}"
+                ],
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 4 helpers
+    # ------------------------------------------------------------------
+
+    def _build_returns_panel(self, symbols, start, end) -> "pd.DataFrame":  # type: ignore[name-defined]
+        """Build a daily returns panel (rows=date, cols=symbol).
+
+        Reuses the same DB-first / fetcher-fallback loader the rest of
+        the lab uses; symbols with no usable history simply don't
+        appear in the panel (caller surfaces them via diagnostics).
+        """
+        import pandas as pd
+        from src.services.history_loader import load_history_df
+
+        span = (end - start).days + 60  # buffer so daily pct_change has data
+        cols = {}
+        for code in symbols:
+            try:
+                df, _ = load_history_df(code, days=span, target_date=end)
+            except Exception as exc:
+                logger.warning("optimizer: load_history_df(%s) raised: %s", code, exc)
+                continue
+            if df is None or df.empty or "date" not in df.columns or "close" not in df.columns:
+                continue
+            df = df.copy()
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            df = df.sort_values("date").reset_index(drop=True)
+            close = pd.Series(
+                df["close"].astype(float).to_numpy(),
+                index=df["date"].to_numpy(),
+                dtype=float,
+            )
+            ret = close.pct_change()
+            mask = (ret.index >= start) & (ret.index <= end)
+            cols[code] = ret[mask].dropna()
+        if not cols:
+            return pd.DataFrame()
+        return pd.DataFrame(cols).sort_index()
