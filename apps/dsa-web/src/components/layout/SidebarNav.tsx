@@ -39,7 +39,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
 
   return (
     <div className="flex h-full flex-col">
-      <div className={cn('mb-4 flex items-center gap-2', collapsed ? 'justify-center' : '')}>
+      <div className={cn('mb-4 flex items-center gap-2', collapsed ? 'justify-center' : 'pl-4')}>
         <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-primary-gradient text-[hsl(var(--primary-foreground))] shadow-[0_12px_28px_var(--nav-brand-shadow)]">
           <BarChart3 className="h-5 w-5" />
         </div>
