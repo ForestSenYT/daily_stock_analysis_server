@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] Quant Research Lab Phase 7 — Web 工作台：新增 `apps/dsa-web/src/pages/QuantResearchPage.tsx`（双 Tab：Factor Lab + Research Backtest）、`apps/dsa-web/src/api/quantResearch.ts`（封装 `/api/v1/quant/status` / `/capabilities` / `/factors` / `/factors/evaluate` / `/backtests/run`）、`apps/dsa-web/src/types/quantResearch.ts` 类型定义；在 `App.tsx` 注册 `/quant` 路由并在 `SidebarNav` 增加「量化研究」入口（`FlaskConical` 图标），其余 5 个路由（`/`、`/chat`、`/portfolio`、`/backtest`、`/settings`）行为与默认 skill 不变。
 - [改进] 量化研究页面复用现有 `Shell` / `AuthProvider` / 主题与 `apiClient`（含 401 重定向、camelCase 转换、`ParsedApiError` 解析），不新增第二套路由 / 鉴权 / HTTP 客户端；使用 Recharts 渲染 IC 序列、分位收益、净值曲线、回撤曲线和最近调仓权重饼图，每个图表均提供空状态降级；所有运行入口在 `QUANT_RESEARCH_ENABLED=false` 时显示「未启用」横幅并禁用按钮，错误统一通过 `ApiErrorAlert` 展示而非吞掉。
 - [改进] 在量化研究页面顶部固定渲染「研究专用 · 非投资建议」黄色提示，分位多空策略权重表格额外标注"负权重为模拟空头腿，仅作为研究分析口径，不会下单"，明确边界。
+- [文档] `.env.example` 在 `QUANT_RESEARCH_ENABLED` 段补充各 HTTP / Agent 路径的硬编码安全上限（stock pool / forward_window / 时间窗 / token 数 / LLM timeout）以及"AI 输出走 parse_json_strict → shape → safety 三层校验、永不输出 .py / 不被 eval / 不下单"的运维可见说明，不引入新的可配置项以避免 Cloud Run 1 GiB 单实例被超大请求打爆。
+- [测试] 新增 `apps/dsa-web/src/pages/__tests__/QuantResearchPage.test.tsx`（8 个用例）：覆盖研究专用免责提示常驻、`/api/v1/quant/status` 与 `/factors` 拉取、enabled 时显示 phase badge、disabled 时显示「未启用」横幅且 `运行评估` 按钮被禁用、Factor Lab 与 Research Backtest Tab 切换、空股票池被前端拦截不发请求、因子评估返回后渲染 IC 指标面板、研究回测返回后渲染 Sharpe / Total Return / no-lookahead chip，与既有 6 个页面 `__tests__/<Page>.test.tsx` 惯例对齐。
+- [改进] Phase 字串单一真源：`api/v1/endpoints/quant_research.py:/healthcheck` 改为引用 `service._CURRENT_PHASE`（之前硬编码 `phase-5-ai-factor-generation` 与 service 的 `phase-6-agent-integration` 漂移）；同时把 `_CURRENT_PHASE` 推进到 `phase-7-web-workbench`，让 `/status`、`/healthcheck` 与 capability 列表三处永远同步。
+- [文档] `src/quant_research/backtest/engine.py:run_backtest` docstring 重写为与实现一致的"latest signal_d strictly less than rebalance d"（之前写成 `factor_panel.shift(1).loc[t]`，与代码里的 `prior_dates = factor_panel.index[factor_panel.index < d]` / `prior_dates[-1]` 不一致；语义等价但读源码会困惑），同时显式说明 daily 调仓塌陷为 1 个交易日滞后，weekly/monthly 滞后更长但永不为零。
 
 ## [3.14.2] - 2026-04-30
 

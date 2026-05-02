@@ -43,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-6-agent-integration"
+_CURRENT_PHASE = "phase-7-web-workbench"
 
 
 class QuantResearchService:

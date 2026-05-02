@@ -45,7 +45,7 @@ from src.quant_research.schemas import (
     ResearchBacktestRequest,
     ResearchBacktestResult,
 )
-from src.quant_research.service import QuantResearchService
+from src.quant_research.service import _CURRENT_PHASE, QuantResearchService
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,9 @@ def quant_capabilities() -> QuantResearchCapabilities:
     ),
 )
 def quant_healthcheck() -> Dict[str, Any]:
-    return {"ok": True, "module": "quant_research", "phase": "phase-5-ai-factor-generation"}
+    # Single source of truth — pull from service so the healthcheck
+    # never drifts from `service.status().phase` again.
+    return {"ok": True, "module": "quant_research", "phase": _CURRENT_PHASE}
 
 
 # =====================================================================

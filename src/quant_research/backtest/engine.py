@@ -362,8 +362,16 @@ def _compute_weights_equal(stocks_alive: List[str]) -> Dict[str, float]:
 def run_backtest(inputs: BacktestInputs) -> BacktestResult:
     """End-to-end backtest. Caller pre-validates input limits.
 
-    Implements close-to-close PnL with a 1-day signal lag:
-      - rebalance day t: weights = f(factor_panel.shift(1).loc[t])
+    Implements close-to-close PnL with a strict 1-or-more-day signal
+    lag — the structural no-lookahead guarantee the engine advertises
+    via ``diagnostics.lookahead_bias_guard=True``:
+
+      - rebalance day d: weights = f(factor_panel.loc[signal_d])
+        where ``signal_d`` is the latest index in ``factor_panel`` with
+        ``signal_d < d`` (see ``prior_dates[-1]`` below). When the
+        factor refreshes daily this collapses to a 1-trading-day lag;
+        on weekly/monthly rebalances the lag may be longer but is
+        never zero.
       - daily PnL between rebalances = Σ weight × close-to-close return
       - cost charged on rebalance day after PnL (so it deducts from NAV
         before tomorrow starts)
