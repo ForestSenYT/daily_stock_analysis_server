@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] Quant Research Lab Phase 5 — AI FactorSpec 生成：新增 `src/quant_research/ai/`（`prompts.py` / `validators.py` / `factor_generator.py`）和两个端点 `POST /api/v1/quant/factors/generate`、`POST /api/v1/quant/factors/generate-and-evaluate`。LLM 复用现有 `LLMToolAdapter`（LiteLLM Router），不新建 provider client；输出走"严格 JSON 解析 → schema/枚举校验 → AST 白名单 + 危险措辞扫描"三层管道，任何失败都映射为带稳定 `error.code` 的 400，AI 永远不会生成或执行 `.py` 代码。
 - [测试] 新增 `tests/test_quant_research_ai.py`（38 例）覆盖 `parse_json_strict` / `validate_factor_spec_shape` / `validate_factor_spec_safety` 各分支、`FactorGenerator` Mock 路径（合法 / Markdown 包裹 / 非 JSON / 危险表达式 / 危险措辞 / LLM 不可用 / provider error / 异常包裹）以及 service + endpoint 在禁用 / 不安全输出下的 503 / 400 行为。
 - [文档] `docs/quant-research-lab.md` 新增 Phase 5 端点契约、三层校验表与错误码列表，刷新 roadmap 状态与 LLM 安全保证。
+- [新功能] Quant Research Lab Phase 6 — 接入现有 Agent：新增 `src/agent/tools/quant_research_tools.py`（5 个工具：`list_quant_factors` / `evaluate_quant_factor` / `run_quant_factor_backtest` / `get_quant_research_run` / `get_quant_portfolio_risk`），通过 `src/agent/factory.py:get_tool_registry()` 末尾追加 `ALL_QUANT_RESEARCH_TOOLS` 注入 ToolRegistry；不新增第二套 Agent / 不改 LLM 适配层 / 不改 `AGENT_SYSTEM_PROMPT` 与 `CHAT_SYSTEM_PROMPT`。每个 handler 在 `QUANT_RESEARCH_ENABLED=false` 时返回结构化 `not_enabled`，并在 agent 路径上对股票数 / forward_window / 结果行数施加更紧的上限（25 / 30 / 32）。
+- [新功能] 新增可选技能 `strategies/quant_research/SKILL.md`：`default-active=false`、`default-router=false`、`user-invocable=true`，规定"先提假设 → 因子探索 → IC 评估 → 研究回测 → 风险复核 → 输出研究免责"工作流；不替代 `bull_trend` 等默认策略，不改变默认 `/chat` 行为。
+- [改进] `api/v1/endpoints/agent.py` `TOOL_DISPLAY_NAMES` 追加五个量化工具的中文名（列出量化因子 / 评估量化因子 / 运行研究回测 / 获取研究回测结果 / 评估组合研究风险），不改既有顺序。
+- [测试] 新增 `tests/test_quant_research_agent_integration.py` 覆盖 ToolRegistry 暴露顺序、feature flag 关闭时各工具 not_enabled、安全边界（互斥参数、stock pool / 风险符号上限、`run_id` 必填）、SkillManager 加载 `quant_research` 且不进入 default-active 集合、`/api/v1/agent/skills` 返回中文显示名、TOOL_DISPLAY_NAMES 完整覆盖。
 
 ## [3.14.2] - 2026-04-30
 

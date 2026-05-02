@@ -34,6 +34,13 @@ TOOL_DISPLAY_NAMES: Dict[str, str] = {
     "get_skill_backtest_summary": "获取技能回测概览",
     "get_strategy_backtest_summary": "获取策略回测概览",
     "get_stock_backtest_summary": "获取个股回测数据",
+    # Phase 6 — Quant Research Lab tools (opt-in via quant_research skill;
+    # default skill set is unchanged so existing analyses are unaffected).
+    "list_quant_factors":          "列出量化因子",
+    "evaluate_quant_factor":       "评估量化因子",
+    "run_quant_factor_backtest":   "运行研究回测",
+    "get_quant_research_run":      "获取研究回测结果",
+    "get_quant_portfolio_risk":    "评估组合研究风险",
 }
 
 logger = logging.getLogger(__name__)

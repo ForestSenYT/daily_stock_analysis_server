@@ -32,8 +32,16 @@ from src.agent.skills.base import Skill, SkillManager
 
 
 def _builtin_strategy_names() -> set[str]:
+    """Return every built-in skill id discoverable under strategies/.
+
+    Includes both the legacy top-level ``*.yaml`` skills and any
+    ``SKILL.md`` bundles in subdirectories — the SkillManager loads
+    both, so the count assertion below must match.
+    """
     strategies_dir = Path(__file__).resolve().parent.parent / "strategies"
-    return {path.stem for path in strategies_dir.glob("*.yaml")}
+    yaml_names = {path.stem for path in strategies_dir.glob("*.yaml")}
+    bundle_names = {path.parent.name for path in strategies_dir.rglob("SKILL.md")}
+    return yaml_names | bundle_names
 
 
 # ============================================================

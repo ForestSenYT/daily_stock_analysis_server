@@ -1,6 +1,6 @@
 # Quant Research Lab
 
-> Status: **Phase 5 — AI FactorSpec Generation** (this build).
+> Status: **Phase 6 — Agent Integration** (this build).
 > Master flag: `QUANT_RESEARCH_ENABLED` (default `false`).
 
 ## What it is
@@ -393,6 +393,69 @@ the endpoint still returns `200` with `evaluation: null` and a
 diagnostic line — the spec itself is still useful research output
 even when the panel is too sparse to evaluate.
 
+## Agent integration *(Phase 6)*
+
+Phase 6 plugs the lab into the **existing** agent stack. There is no
+second agent framework, no new LLM adapter, no edits to
+`AGENT_SYSTEM_PROMPT` / `CHAT_SYSTEM_PROMPT`. The five quant tools join
+the same `ToolRegistry` as the existing 18 tools, and an opt-in skill
+bundle provides the natural-language workflow.
+
+### New tools (registered in `src/agent/factory.py`)
+
+| Tool | Category | Purpose |
+| --- | --- | --- |
+| `list_quant_factors` | data | List the built-in factor catalog (ids, expected directions, lookback days). |
+| `evaluate_quant_factor` | analysis | IC / RankIC / quantile returns on a stock pool. Either `builtin_id` or AST-whitelisted `expression`. |
+| `run_quant_factor_backtest` | analysis | Top-K long-only, simulated long-short, or equal-weight baseline. NAV curve + positions truncated for LLM payload. |
+| `get_quant_research_run` | data | Look up a cached backtest by `run_id`. |
+| `get_quant_portfolio_risk` | analysis | Concentration / VaR / CVaR / drawdown / volatility / beta on hypothetical weights. |
+
+The agent path enforces **tighter** caps than the HTTP layer (which
+remains authoritative for direct callers):
+
+| Cap | HTTP API | Agent tool |
+| --- | --- | --- |
+| Stocks per evaluation | 50 | 25 |
+| Stocks per backtest | 50 | 25 |
+| Forward window (days) | 60 | 30 |
+| Risk symbols | 50 | 25 |
+| NAV / positions rows | unlimited | truncated to 32 with disclosure |
+
+When `QUANT_RESEARCH_ENABLED=false`, every handler returns
+`{"enabled": false, "status": "not_enabled", "message": …}` instead
+of attempting work.
+
+### Opt-in skill: `quant_research`
+
+A `SKILL.md` bundle at `strategies/quant_research/SKILL.md` provides
+a workflow guide: hypothesis → factor exploration → cross-sectional
+evaluation → research backtest → risk review → conclusion with
+research-only disclaimer. The skill is loaded automatically by
+`SkillManager` (via the existing `rglob("SKILL.md")` path) but is
+never default-active:
+
+| Frontmatter field | Value | Effect |
+| --- | --- | --- |
+| `default-active` | `false` | Stays out of the default rotation; `bull_trend` remains the primary default. |
+| `default-router` | `false` | Not picked by regime / router fallbacks. |
+| `user-invocable` | `true` | Surfaces in `GET /api/v1/agent/skills` as 量化研究助手. |
+| `aliases` | 因子 / 因子研究 / 量化研究 / 量化回测 / quant / factor / factor lab | Optional NL hooks for selectors. |
+| `required-tools` | the five quant tools above | SkillManager exposes the binding for UI. |
+
+To activate it explicitly:
+
+```bash
+curl -X POST /api/v1/agent/chat \
+  -H "Cookie: <admin session>" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "测试 ma_ratio_5_20 在最近 6 个月的 IC", "skills": ["quant_research"]}'
+```
+
+Existing callers who don't pass `skills` see no change — the default
+skill set, default `/chat` routing, default analysis prompts, and the
+existing 18-tool order are all preserved.
+
 ## Roadmap
 
 | Phase | Feature | Status |
@@ -401,8 +464,8 @@ even when the panel is too sparse to evaluate.
 | P2 | Factor library: 8 built-in factors, IC / RankIC, quantile returns, safe-expression AST validator | ✅ shipped |
 | P3 | Research backtest engine (top-k long-only, simulated long-short, equal-weight baseline), Sharpe / Sortino / drawdown / turnover, optional benchmark, no-lookahead guard | ✅ shipped |
 | P4 | Portfolio optimizer (5 algorithms + constraint pipeline), research-risk metrics (concentration / VaR / CVaR / drawdown / vol / beta), live PortfolioRiskService adapter | ✅ shipped |
-| **P5** | **AI FactorSpec generation — LLM emits a single JSON object, validated by AST whitelist + dangerous-phrase scan; `generate-and-evaluate` chains generation into the Phase-2 evaluator** | ✅ this build |
-| P6 | Agent integration — opt-in tools + skill, default skill set unchanged | planned |
+| P5 | AI FactorSpec generation — LLM emits a single JSON object, validated by AST whitelist + dangerous-phrase scan; `generate-and-evaluate` chains generation into the Phase-2 evaluator | ✅ shipped |
+| **P6** | **Agent integration — 5 opt-in tools registered in the existing `ToolRegistry`; opt-in `quant_research` skill (default-active=false, user-invocable=true); AGENT/CHAT prompts and default skill set unchanged** | ✅ this build |
 | P7 | SPA — `/quant` route, factor explorer, backtest result charts (Recharts) | planned |
 
 ## Configuration

@@ -162,9 +162,24 @@ def get_tool_registry():
     from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
     from src.agent.tools.market_tools import ALL_MARKET_TOOLS
     from src.agent.tools.backtest_tools import ALL_BACKTEST_TOOLS
+    from src.agent.tools.quant_research_tools import ALL_QUANT_RESEARCH_TOOLS
 
+    # Order matters for downstream LLM tool declarations: keep the
+    # existing five pools in their original order and append the
+    # quant-research pool at the very end so no existing tool's
+    # position changes. Each tool handler is feature-flag gated and
+    # returns a structured ``not_enabled`` payload when
+    # ``QUANT_RESEARCH_ENABLED`` is off, so registering them here is
+    # safe even on disabled deployments.
     registry = ToolRegistry()
-    for tool_fn in ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS + ALL_BACKTEST_TOOLS:
+    for tool_fn in (
+        ALL_DATA_TOOLS
+        + ALL_ANALYSIS_TOOLS
+        + ALL_SEARCH_TOOLS
+        + ALL_MARKET_TOOLS
+        + ALL_BACKTEST_TOOLS
+        + ALL_QUANT_RESEARCH_TOOLS
+    ):
         registry.register(tool_fn)
 
     _TOOL_REGISTRY = registry

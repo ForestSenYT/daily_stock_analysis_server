@@ -482,14 +482,14 @@ class Phase5EndpointResponseTests(unittest.TestCase):
         self.assertEqual(body["field"], "unsafe_expression")
 
     def test_capability_listed_as_available(self) -> None:
-        # Phase-5 should be live in this build; Phase-6 still placeholder.
+        # Phase-5 + Phase-6 should be live in this build.
         from src.quant_research.service import QuantResearchService
 
         service = QuantResearchService(config=_fake_config(True))
         caps = service.capabilities()
         live = {c.name: c.available for c in caps.capabilities}
         self.assertTrue(live["ai_factor_generation"])
-        self.assertFalse(live["agent_integration"])
+        self.assertTrue(live["agent_integration"])
 
 
 if __name__ == "__main__":

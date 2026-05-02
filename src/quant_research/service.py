@@ -43,7 +43,7 @@ from src.quant_research.schemas import (
 logger = logging.getLogger(__name__)
 
 # Roadmap phase the current build implements; updated by later phases.
-_CURRENT_PHASE = "phase-5-ai-factor-generation"
+_CURRENT_PHASE = "phase-6-agent-integration"
 
 
 class QuantResearchService:
@@ -90,16 +90,16 @@ class QuantResearchService:
             message=(
                 "Quant Research Lab is live. Phase 2 (Factor Lab), "
                 "Phase 3 (Research Backtest Lab), Phase 4 (Portfolio "
-                "Optimizer + Risk Research), and Phase 5 (AI FactorSpec "
-                "generation) are operational. Phase 5 endpoints: "
-                "POST /api/v1/quant/factors/generate translates a "
-                "natural-language hypothesis into a validated FactorSpec "
-                "JSON (AST-whitelisted expression, scrubbed of unsafe "
-                "marketing phrases); POST /api/v1/quant/factors/"
-                "generate-and-evaluate chains the generator into the "
-                "existing factor evaluator in one round-trip. The LLM "
-                "never emits Python code — only structured FactorSpec. "
-                "Agent integration is still pending in Phase 6."
+                "Optimizer + Risk Research), Phase 5 (AI FactorSpec "
+                "generation), and Phase 6 (Agent integration) are all "
+                "operational. Phase 6 plugs the lab into the existing "
+                "Agent ToolRegistry as five opt-in tools "
+                "(list_quant_factors / evaluate_quant_factor / "
+                "run_quant_factor_backtest / get_quant_research_run / "
+                "get_quant_portfolio_risk) and ships an opt-in skill "
+                "(`quant_research`, default_active=false, "
+                "user_invocable=true). The default skill set and "
+                "AGENT_SYSTEM_PROMPT / CHAT_SYSTEM_PROMPT are unchanged."
             ),
             phase=_CURRENT_PHASE,
         )
@@ -194,17 +194,25 @@ class QuantResearchService:
             QuantResearchCapability(
                 name="agent_integration",
                 title="Existing Agent Integration",
-                available=False,
+                available=True,
                 phase="phase-6",
                 description=(
                     "Plugs Quant Research Lab into the existing Agent "
-                    "ToolRegistry as opt-in tools. Default skill set is "
-                    "unchanged — users must explicitly select the "
-                    "`quant_research` skill in /api/v1/agent/chat."
+                    "ToolRegistry as five opt-in tools (list_quant_factors / "
+                    "evaluate_quant_factor / run_quant_factor_backtest / "
+                    "get_quant_research_run / get_quant_portfolio_risk). "
+                    "Each handler is feature-flag gated and returns "
+                    "`not_enabled` when QUANT_RESEARCH_ENABLED=false. The "
+                    "`quant_research` skill is opt-in only "
+                    "(default_active=false, user_invocable=true) — default "
+                    "skill set, AGENT_SYSTEM_PROMPT, and CHAT_SYSTEM_PROMPT "
+                    "are unchanged. Tools enforce tighter caps than the "
+                    "HTTP layer: ≤25 stocks per call, ≤30-day forward "
+                    "window, truncated NAV / position payloads."
                 ),
                 endpoints=[
-                    "GET  /api/v1/agent/skills (existing)",
-                    "POST /api/v1/agent/chat   (existing)",
+                    "GET  /api/v1/agent/skills (existing — quant_research listed as optional)",
+                    "POST /api/v1/agent/chat   (existing — pass skills=[\"quant_research\"] to opt in)",
                 ],
                 requires_optional_deps=[],
             ),
