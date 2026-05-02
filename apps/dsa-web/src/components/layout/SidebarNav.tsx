@@ -58,7 +58,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
             aria-label={label}
             className={({ isActive }) =>
               cn(
-                'group relative mx-1 flex items-center gap-3 overflow-hidden rounded-xl border text-sm transition-all',
+                'group relative mr-2 flex items-center gap-3 overflow-hidden rounded-xl border text-sm transition-all',
                 'h-[var(--nav-item-height)]',
                 collapsed ? 'justify-center px-0' : 'px-3',
                 isActive
