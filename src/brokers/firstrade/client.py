@@ -243,16 +243,26 @@ class FirstradeReadOnlyClient:
             try:
                 profile_path = self._config.broker_firstrade_profile_path
                 Path(profile_path).expanduser().mkdir(parents=True, exist_ok=True)
-                ft_session = account_module.FTSession(
-                    username=self._config.broker_firstrade_username,
-                    password=self._config.broker_firstrade_password,
-                    pin=self._config.broker_firstrade_pin or None,
-                    email=self._config.broker_firstrade_email or None,
-                    phone=self._config.broker_firstrade_phone or None,
-                    mfa_secret=self._config.broker_firstrade_mfa_secret or None,
-                    profile_path=profile_path,
-                    save_session=bool(self._config.broker_firstrade_save_session),
+                # The vendor SDK's signature has churned across versions
+                # (e.g. 0.0.38 does NOT accept ``save_session``). Build
+                # the kwarg set we'd ideally pass, then drop any name
+                # the installed FTSession.__init__ rejects so we don't
+                # crash construction. Anything we drop is logged once
+                # so behaviour drift stays visible.
+                desired_kwargs: Dict[str, Any] = {
+                    "username": self._config.broker_firstrade_username,
+                    "password": self._config.broker_firstrade_password,
+                    "pin": self._config.broker_firstrade_pin or None,
+                    "email": self._config.broker_firstrade_email or None,
+                    "phone": self._config.broker_firstrade_phone or None,
+                    "mfa_secret": self._config.broker_firstrade_mfa_secret or None,
+                    "profile_path": profile_path,
+                    "save_session": bool(self._config.broker_firstrade_save_session),
+                }
+                ft_kwargs = self._filter_supported_kwargs(
+                    account_module.FTSession, desired_kwargs,
                 )
+                ft_session = account_module.FTSession(**ft_kwargs)
                 need_code = ft_session.login()
             except Exception as exc:  # noqa: BLE001 — boundary
                 logger.warning(
@@ -488,6 +498,52 @@ class FirstradeReadOnlyClient:
             return len(list(seq or []))
         except Exception:
             return 0
+
+    # Cache so we only log dropped-kwarg warnings once per class+kwargset.
+    _LOGGED_DROPPED_KWARGS: set = set()
+
+    @classmethod
+    def _filter_supported_kwargs(
+        cls, target_callable: Any, kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return only the kwargs that ``target_callable`` accepts.
+
+        The vendor SDK's signatures have changed across versions (e.g.
+        ``firstrade==0.0.38`` does not accept ``save_session``). Rather
+        than hard-couple this client to one library version, we
+        introspect the constructor and drop unsupported kwargs.
+        Dropped names are logged exactly once per (callable id, name)
+        pair so behaviour drift stays visible without spamming logs.
+        """
+        import inspect
+        try:
+            sig = inspect.signature(target_callable)
+        except (TypeError, ValueError):
+            # If introspection fails, fall back to the original kwargs;
+            # construction will raise its own clear error.
+            return dict(kwargs)
+        params = sig.parameters
+        # If the target accepts **kwargs, all names are fine.
+        accepts_var_kw = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        if accepts_var_kw:
+            return dict(kwargs)
+        accepted: Dict[str, Any] = {}
+        for name, value in kwargs.items():
+            if name in params:
+                accepted[name] = value
+                continue
+            cache_key = (id(target_callable), name)
+            if cache_key not in cls._LOGGED_DROPPED_KWARGS:
+                cls._LOGGED_DROPPED_KWARGS.add(cache_key)
+                logger.warning(
+                    "[firstrade] dropping unsupported FTSession kwarg %r "
+                    "(SDK %s does not accept it)",
+                    name,
+                    getattr(target_callable, "__module__", "?"),
+                )
+        return accepted
 
     @staticmethod
     def _extract_real_account_number(raw: Any) -> str:
