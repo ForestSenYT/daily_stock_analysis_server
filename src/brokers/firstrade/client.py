@@ -367,9 +367,11 @@ class FirstradeReadOnlyClient:
             )
             return []
         salt = self._salt()
+        skipped = 0
         for raw in raw_accounts:
             real_account = self._extract_real_account_number(raw)
             if not real_account:
+                skipped += 1
                 continue
             account_hash = hash_account_number(real_account, salt)
             last4, alias = mask_account_number(real_account)
@@ -383,6 +385,21 @@ class FirstradeReadOnlyClient:
                     as_of=_now_iso(),
                     raw_payload=_as_dict(raw),
                 )
+            )
+        if skipped or not accounts:
+            # Log row-shape diagnostics WITHOUT leaking the account
+            # numbers themselves: only the type + key list. This makes
+            # SDK-shape drift debuggable from logs alone.
+            shapes = []
+            for raw in raw_accounts[:5]:  # cap so log line stays small
+                if isinstance(raw, dict):
+                    shapes.append("dict(keys=%s)" % sorted(raw.keys())[:8])
+                else:
+                    shapes.append(type(raw).__name__)
+            logger.warning(
+                "[firstrade] list_accounts: total=%d, extracted=%d, skipped=%d. "
+                "Vendor row shape sample (first 5): %s",
+                len(raw_accounts), len(accounts), skipped, shapes,
             )
         return accounts
 
@@ -549,11 +566,19 @@ class FirstradeReadOnlyClient:
     def _extract_real_account_number(raw: Any) -> str:
         """Pull the real account number out of a vendor account row.
 
-        We try several known field names because the vendor SDK has
-        churned through naming over its lifetime. The result is used
-        only inside this client's in-memory ``_account_map`` and never
-        leaves the package via any DTO / log / response.
+        ``firstrade==0.0.38`` returns ``all_accounts`` as a **list of
+        plain account-number strings** (not dicts) — older / newer
+        releases sometimes wrap them in a small object or dict. We
+        accept both shapes, plus a numeric form, so this connector
+        survives small SDK reshuffles. The result is used only inside
+        this client's in-memory ``_account_map`` and never leaves the
+        package via any DTO / log / response.
         """
+        # 1) Bare string / number — the common 0.0.38 shape.
+        if isinstance(raw, (str, int)):
+            return str(raw).strip()
+
+        # 2) Dict / object with one of the known field names.
         candidate = _first_present(
             raw,
             "account",
@@ -561,8 +586,11 @@ class FirstradeReadOnlyClient:
             "accountNo",
             "accountNumber",
             "accountID",
+            "account_id",
             "id",
             "number",
+            "AcctNumber",
+            "acct_number",
         )
         if candidate is None:
             return ""
