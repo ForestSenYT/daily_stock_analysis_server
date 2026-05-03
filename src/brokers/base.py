@@ -93,7 +93,15 @@ class BrokerPosition:
     market_value: Optional[float] = None
     avg_cost: Optional[float] = None
     last_price: Optional[float] = None
+    # ``unrealized_pnl`` is the lifetime open-position P&L (vs. avg_cost).
+    # ``day_change`` / ``day_change_pct`` are the SAME-DAY price move,
+    # which is what the Firstrade web UI shows in its "变更$ / 变更%"
+    # columns. Most users care about same-day moves for monitoring,
+    # so we surface both to keep the panel content matching what they
+    # see in the broker's own UI.
     unrealized_pnl: Optional[float] = None
+    day_change: Optional[float] = None
+    day_change_pct: Optional[float] = None
     currency: Optional[str] = None
     as_of: Optional[str] = None
     raw_payload: Dict[str, Any] = field(default_factory=dict)

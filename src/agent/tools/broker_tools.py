@@ -171,6 +171,12 @@ def _project_position(
         "avg_cost": payload.get("avg_cost"),
         "last_price": payload.get("last_price"),
         "unrealized_pnl": payload.get("unrealized_pnl"),
+        # Same-day move — what the broker UI shows in 变更$ / 变更%.
+        # The agent uses these for "is this position trending up or
+        # down today?" reasoning; ``unrealized_pnl`` answers a
+        # different question (lifetime P&L vs. avg_cost).
+        "day_change": payload.get("day_change"),
+        "day_change_pct": payload.get("day_change_pct"),
         "currency": payload.get("currency") or "USD",
         "weight_pct": weight_pct,
         "as_of": row.get("as_of"),

@@ -65,6 +65,20 @@ function formatPct(value: number | null | undefined): string {
   return `${Number(value).toFixed(2)}%`;
 }
 
+function formatSigned(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '--';
+  const v = Number(value);
+  const sign = v > 0 ? '+' : '';
+  return `${sign}${v.toFixed(2)}`;
+}
+
+function formatSignedPct(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '--';
+  const v = Number(value);
+  const sign = v > 0 ? '+' : '';
+  return `${sign}${v.toFixed(2)}%`;
+}
+
 function ageInSeconds(asOf: string | null | undefined): number | null {
   if (!asOf) return null;
   const parsed = Date.parse(asOf);
@@ -237,9 +251,21 @@ const FirstradeSyncPanel: React.FC = () => {
   const snapshotAge = useMemo(() => ageInSeconds(snapshot?.asOf), [snapshot]);
   const isStale = snapshotAge != null && snapshotAge > STALE_THRESHOLD_SECONDS;
   const totalPositions = snapshot?.positions?.length ?? 0;
+  // Show ALL positions (not capped at 10) — the typical retail user
+  // has 5-30 positions and wants the full picture for monitoring.
+  // The API itself caps server-side; UI doesn't need a second limit.
   const previewPositions = useMemo(
-    () => (snapshot?.positions ?? []).slice(0, MAX_PREVIEW_POSITIONS),
+    () => snapshot?.positions ?? [],
     [snapshot],
+  );
+
+  // Total notional across all positions (used for weight_pct).
+  const totalMarketValue = useMemo(
+    () => previewPositions.reduce(
+      (acc, p) => acc + (p.payload?.marketValue ?? 0),
+      0,
+    ),
+    [previewPositions],
   );
 
   // ---- Render -------------------------------------------------------
@@ -386,52 +412,101 @@ const FirstradeSyncPanel: React.FC = () => {
             />
           ) : (
             <div className="overflow-x-auto rounded-xl border border-border/40 bg-card/30">
-              <table className="w-full min-w-[560px] text-xs">
+              <table className="w-full min-w-[680px] text-xs">
                 <thead className="text-muted-text">
                   <tr className="text-left">
-                    <th className="px-3 py-2">账户</th>
-                    <th className="px-3 py-2">代码</th>
-                    <th className="px-3 py-2 text-right">持仓数</th>
+                    <th className="px-3 py-2">代号</th>
+                    <th className="px-3 py-2 text-right">数量</th>
+                    <th className="px-3 py-2 text-right">最后成交价</th>
+                    <th className="px-3 py-2 text-right">变更$</th>
+                    <th className="px-3 py-2 text-right">变更%</th>
                     <th className="px-3 py-2 text-right">市值</th>
                     <th className="px-3 py-2 text-right">浮盈</th>
                     <th className="px-3 py-2 text-right">权重</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {previewPositions.map((p) => (
-                    <tr
-                      key={`${p.accountHash}-${p.symbol}`}
-                      className="border-t border-border/40"
-                    >
-                      <td className="px-3 py-2 font-mono">{p.accountAlias || '--'}</td>
-                      <td className="px-3 py-2 font-mono">{p.symbol || '--'}</td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {formatNumber(p.quantity, 0)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {formatNumber(p.marketValue)}
-                      </td>
-                      <td
-                        className={cn(
-                          'px-3 py-2 text-right font-mono',
-                          (p.unrealizedPnl ?? 0) >= 0 ? 'text-success' : 'text-danger',
-                        )}
+                  {previewPositions.map((p) => {
+                    const payload = p.payload || {};
+                    const marketValue = payload.marketValue ?? null;
+                    const weightPct =
+                      marketValue != null && totalMarketValue > 0
+                        ? (marketValue / totalMarketValue) * 100
+                        : null;
+                    const dayChange = payload.dayChange ?? null;
+                    const dayChangePct = payload.dayChangePct ?? null;
+                    const unrealized = payload.unrealizedPnl ?? null;
+                    return (
+                      <tr
+                        key={`${p.accountHash}-${p.symbol}-${p.id ?? ''}`}
+                        className="border-t border-border/40"
                       >
-                        {formatNumber(p.unrealizedPnl)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {formatPct(p.weightPct)}
-                      </td>
-                    </tr>
-                  ))}
+                        <td className="px-3 py-2 font-mono text-foreground">
+                          {p.symbol || payload.symbol || '--'}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatNumber(payload.quantity ?? null, 0)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatNumber(payload.lastPrice ?? null)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-3 py-2 text-right font-mono',
+                            dayChange == null
+                              ? 'text-muted-text'
+                              : dayChange >= 0
+                                ? 'text-success'
+                                : 'text-danger',
+                          )}
+                        >
+                          {formatSigned(dayChange)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-3 py-2 text-right font-mono',
+                            dayChangePct == null
+                              ? 'text-muted-text'
+                              : dayChangePct >= 0
+                                ? 'text-success'
+                                : 'text-danger',
+                          )}
+                        >
+                          {formatSignedPct(dayChangePct)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatNumber(marketValue)}
+                        </td>
+                        <td
+                          className={cn(
+                            'px-3 py-2 text-right font-mono',
+                            unrealized == null
+                              ? 'text-muted-text'
+                              : unrealized >= 0
+                                ? 'text-success'
+                                : 'text-danger',
+                          )}
+                        >
+                          {formatNumber(unrealized)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatPct(weightPct)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
+                <tfoot>
+                  <tr className="border-t border-border/60 bg-card/20">
+                    <td className="px-3 py-2 font-mono font-semibold">合计</td>
+                    <td colSpan={4} />
+                    <td className="px-3 py-2 text-right font-mono font-semibold">
+                      {formatNumber(totalMarketValue)}
+                    </td>
+                    <td colSpan={2} />
+                  </tr>
+                </tfoot>
               </table>
-              {totalPositions > previewPositions.length ? (
-                <p className="px-3 py-2 text-xs text-muted-text">
-                  仅展示前 {previewPositions.length} / {totalPositions} 条。完整快照可通过 API
-                  `/api/v1/broker/firstrade/snapshot` 查询。
-                </p>
-              ) : null}
             </div>
           )}
 

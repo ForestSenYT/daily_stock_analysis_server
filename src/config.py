@@ -851,6 +851,12 @@ class Config:
     broker_firstrade_sync_interval_seconds: int = 60   # clamp 后续 [30, 3600]
     broker_firstrade_sync_market_hours_only: bool = True
     broker_firstrade_llm_data_scope: str = "positions_and_balances"
+    # 当 vendor 的 ``all_accounts`` 是 dict 形态（一个真实账号挂了多个
+    # sub-account 视图：cash / margin / IRA / Roth / options 等），是否
+    # 在 client 层合并成单个"主账户"。默认 True — 适合大多数零售用户的
+    # 心智模型（"我只有一个账户"）。把它关掉则保留 vendor 原本的 N 个
+    # sub-account（适合真有多个独立账户：个人 + 退休账户等）。
+    broker_firstrade_merge_sub_accounts: bool = True
     # 用于把真实 Firstrade 账号哈希成 ``account_hash`` 暴露给 API/Agent。
     # ``BROKER_FIRSTRADE_ENABLED=true`` 时启动期 fail-fast 要求非空，避免
     # 跨部署可关联的弱哈希盐。
@@ -1571,6 +1577,9 @@ class Config:
             ),
             broker_firstrade_llm_data_scope=_normalize_broker_llm_scope(
                 os.getenv('BROKER_FIRSTRADE_LLM_DATA_SCOPE'),
+            ),
+            broker_firstrade_merge_sub_accounts=parse_env_bool(
+                os.getenv('BROKER_FIRSTRADE_MERGE_SUB_ACCOUNTS'), True,
             ),
             broker_account_hash_salt=(os.getenv('BROKER_ACCOUNT_HASH_SALT') or '').strip(),
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',

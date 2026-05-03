@@ -70,18 +70,38 @@ export interface BrokerSnapshotAccount {
   asOf: string | null;
 }
 
+/**
+ * Snapshot rows from `/api/v1/broker/firstrade/snapshot` carry the
+ * actual position fields inside ``payload`` (nested) — that matches
+ * how :class:`BrokerSnapshotRepository._row_to_dict` shapes them.
+ * Top-level fields are the indexed columns; everything else is in
+ * ``payload``.
+ */
+export interface BrokerSnapshotPositionPayload {
+  symbol?: string | null;
+  quantity?: number | null;
+  marketValue?: number | null;
+  avgCost?: number | null;
+  lastPrice?: number | null;
+  unrealizedPnl?: number | null;
+  dayChange?: number | null;
+  dayChangePct?: number | null;
+  currency?: string | null;
+  asOf?: string | null;
+  [key: string]: unknown;
+}
+
 export interface BrokerSnapshotPosition {
-  accountAlias: string;
+  id?: number;
+  broker?: string;
+  snapshotType?: string;
   accountHash: string;
-  symbol: string;
-  quantity: number | null;
-  marketValue: number | null;
-  avgCost: number | null;
-  lastPrice: number | null;
-  unrealizedPnl: number | null;
-  currency: string;
-  weightPct?: number | null;
+  accountLast4: string;
+  accountAlias: string;
+  entityHash?: string | null;
+  symbol: string | null;
   asOf: string | null;
+  payload: BrokerSnapshotPositionPayload;
 }
 
 export interface BrokerSnapshotBalance {

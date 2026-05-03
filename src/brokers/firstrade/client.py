@@ -361,19 +361,36 @@ class FirstradeReadOnlyClient:
         try:
             raw_attr = getattr(sdk.account_data, "all_accounts", None)
             raw_accounts = self._normalize_accounts_iterable(raw_attr)
+            # Optional collapse: when the vendor returned a dict with N
+            # sub-account "views" (cash / margin / IRA / Roth / options
+            # etc.) we present them as a SINGLE primary account in the
+            # UI/Agent surface. The flag is on by default — flip it off
+            # via ``BROKER_FIRSTRADE_MERGE_SUB_ACCOUNTS=false`` if you
+            # genuinely hold multiple independent accounts.
+            should_merge = bool(
+                getattr(self._config, "broker_firstrade_merge_sub_accounts", True)
+            )
+            pre_merge_len = len(raw_accounts)
+            if (
+                should_merge
+                and isinstance(raw_attr, dict)
+                and pre_merge_len > 1
+            ):
+                # Keep the first dict entry as the canonical primary;
+                # the other sub-accounts will dispatch to this one when
+                # vendor doesn't tag rows per-account.
+                raw_accounts = raw_accounts[:1]
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[firstrade] list_accounts iteration failed: %s",
                 _sanitize_exception(exc),
             )
             return []
-        # Always log a one-line diagnosis of the raw shape (no account
-        # numbers!) so SDK-version drift is visible from Cloud Run logs
-        # without needing a debug endpoint.
         logger.info(
             "[firstrade] list_accounts: vendor returned attr_type=%s, "
-            "iterable_len=%d, item_types=%s",
+            "iterable_len=%d, after_merge=%d, item_types=%s",
             type(raw_attr).__name__,
+            pre_merge_len,
             len(raw_accounts),
             [type(r).__name__ for r in raw_accounts[:5]],
         )
@@ -425,19 +442,19 @@ class FirstradeReadOnlyClient:
     def get_positions(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerPosition]:
-        return self._iter_per_account(
-            account_hash_or_alias,
-            self._fetch_positions_for,
-            flat=True,
+        return self._fetch_once_and_dispatch(
+            method_names=("get_positions", "positions"),
+            account_hash_or_alias=account_hash_or_alias,
+            row_to_dto=self._raw_to_position,
         )
 
     def get_orders(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerOrder]:
-        return self._iter_per_account(
-            account_hash_or_alias,
-            self._fetch_orders_for,
-            flat=True,
+        return self._fetch_once_and_dispatch(
+            method_names=("get_orders", "orders"),
+            account_hash_or_alias=account_hash_or_alias,
+            row_to_dto=self._raw_to_order,
         )
 
     def get_transactions(
@@ -461,13 +478,11 @@ class FirstradeReadOnlyClient:
                 "returning today's history."
             )
             normalized = "today"
-        return self._iter_per_account(
-            account_hash_or_alias,
-            lambda real, account_hash, last4, alias:
-                self._fetch_transactions_for(
-                    real, account_hash, last4, alias, normalized,
-                ),
-            flat=True,
+        return self._fetch_once_and_dispatch(
+            method_names=("get_history", "get_transactions", "transactions"),
+            account_hash_or_alias=account_hash_or_alias,
+            row_to_dto=self._raw_to_transaction,
+            extra_args=(normalized,),
         )
 
     # ------------------------------------------------------------------
@@ -633,8 +648,13 @@ class FirstradeReadOnlyClient:
             return str(raw).strip()
 
         # 2) Dict / object with one of the known field names.
+        # ``_account_key`` is the synthetic key our ``_normalize_accounts_iterable``
+        # injects when the vendor returns ``{account_number: {details}}`` —
+        # check it FIRST because it carries the dict key (i.e. the
+        # actual account number) which is the canonical identifier.
         candidate = _first_present(
             raw,
+            "_account_key",
             "account",
             "account_number",
             "accountNo",
@@ -739,175 +759,313 @@ class FirstradeReadOnlyClient:
             )
         return None
 
-    def _fetch_positions_for(
-        self, real: str, account_hash: str, last4: str, alias: str,
-    ) -> List[BrokerPosition]:
-        sdk = self._sdk
-        if sdk is None:
-            return []
-        positions: List[BrokerPosition] = []
-        for method in ("get_positions", "positions"):
-            fn = getattr(sdk.account_data, method, None)
-            if fn is None:
-                continue
-            try:
-                raw_iter = fn(real) if callable(fn) else fn
-            except TypeError:
-                raw_iter = fn  # type: ignore[assignment]
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(_sanitize_exception(exc)) from None
-            for raw in list(raw_iter or []):
-                positions.append(
-                    BrokerPosition(
-                        broker=self.BROKER_NAME,
-                        account_hash=account_hash,
-                        account_last4=last4,
-                        account_alias=alias,
-                        symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or ""),
-                        quantity=_to_float(
-                            _first_present(raw, "quantity", "Quantity", "qty", "shares")
-                        ),
-                        market_value=_to_float(
-                            _first_present(raw, "market_value", "MarketValue", "value")
-                        ),
-                        avg_cost=_to_float(
-                            _first_present(raw, "avg_cost", "AvgCost", "average_cost")
-                        ),
-                        last_price=_to_float(
-                            _first_present(raw, "last_price", "LastPrice", "price")
-                        ),
-                        unrealized_pnl=_to_float(
-                            _first_present(raw, "unrealized_pnl", "UnrealizedPnl", "pnl")
-                        ),
-                        currency=_first_present(raw, "currency", "Currency") or "USD",
-                        as_of=_now_iso(),
-                        raw_payload=_as_dict(raw),
-                    )
-                )
-            return positions
-        return positions
+    # -----------------------------------------------------------------
+    # NEW pipeline (vendor-call-once + per-row dispatch)
+    # -----------------------------------------------------------------
+    #
+    # The Firstrade SDK ignores the ``real_account_number`` argument
+    # passed to ``get_positions`` / ``get_orders`` — it returns the
+    # full set of positions regardless. Iterating per sub-account
+    # (the original design) duplicated every row N times where N =
+    # number of sub-accounts. The new flow:
+    #
+    #   1. Resolve the user-requested filter (or all sub-accounts).
+    #   2. Pick a *primary* sub-account to drive the single vendor
+    #      call (the vendor still wants A account-number argument).
+    #   3. Iterate rows once. For each row, look at any vendor-side
+    #      account-id field (``account`` / ``account_id`` / etc.) —
+    #      if present and matching one of OUR sub-account hashes,
+    #      assign the row to that sub-account; otherwise fall back
+    #      to the primary.
+    #
+    # This survives both: (a) SDKs that DO tag rows per account
+    # (correctly distributed), (b) SDKs that don't (everything goes
+    # under primary, no duplication).
 
-    def _fetch_orders_for(
-        self, real: str, account_hash: str, last4: str, alias: str,
-    ) -> List[BrokerOrder]:
-        sdk = self._sdk
-        if sdk is None:
-            return []
-        orders: List[BrokerOrder] = []
-        salt = self._salt()
-        for method in ("get_orders", "orders"):
-            fn = getattr(sdk.account_data, method, None)
-            if fn is None:
-                continue
-            try:
-                raw_iter = fn(real) if callable(fn) else fn
-            except TypeError:
-                raw_iter = fn  # type: ignore[assignment]
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(_sanitize_exception(exc)) from None
-            for raw in list(raw_iter or []):
-                raw_id = str(
-                    _first_present(raw, "order_id", "orderId", "id", "OrderId") or ""
-                )
-                orders.append(
-                    BrokerOrder(
-                        broker=self.BROKER_NAME,
-                        account_hash=account_hash,
-                        account_last4=last4,
-                        account_alias=alias,
-                        order_id_hash=hash_broker_id(raw_id, salt) if raw_id else "",
-                        symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
-                        order_status=_first_present(raw, "status", "Status", "order_status"),
-                        order_side=_first_present(raw, "side", "Side", "action"),
-                        order_type=_first_present(raw, "order_type", "OrderType", "type"),
-                        order_quantity=_to_float(
-                            _first_present(raw, "quantity", "Quantity", "qty")
-                        ),
-                        filled_quantity=_to_float(
-                            _first_present(raw, "filled", "Filled", "filled_quantity")
-                        ),
-                        limit_price=_to_float(
-                            _first_present(raw, "limit_price", "LimitPrice", "price")
-                        ),
-                        as_of=_now_iso(),
-                        raw_payload=_as_dict(raw),
-                    )
-                )
-            return orders
-        return orders
-
-    def _fetch_transactions_for(
+    def _fetch_once_and_dispatch(
         self,
-        real: str,
-        account_hash: str,
-        last4: str,
-        alias: str,
-        date_range: str,
-    ) -> List[BrokerTransaction]:
-        sdk = self._sdk
+        *,
+        method_names,
+        account_hash_or_alias: Optional[str],
+        row_to_dto,
+        extra_args: Tuple = (),
+    ) -> List[Any]:
+        sdk = self._require_logged_in()
         if sdk is None:
             return []
-        salt = self._salt()
-        results: List[BrokerTransaction] = []
-        for method in ("get_history", "get_transactions", "transactions"):
+        # All known sub-accounts (may be one) — needed both for the
+        # per-row dispatch table and for filtering by user input.
+        all_subs = self._resolve_target_accounts(None)
+        if not all_subs:
+            return []
+        # Apply the user's filter AFTER we know the full list, so the
+        # dispatch table still covers every sub-account that vendor
+        # might tag a row with.
+        wanted = (account_hash_or_alias or "").strip().lower() or None
+        primary_real, primary_hash, primary_last4, primary_alias = all_subs[0]
+        # Reverse map: real_account_number → (hash, last4, alias).
+        real_to_meta = {
+            real: (ah, l4, al)
+            for real, ah, l4, al in all_subs
+        }
+
+        # Single vendor call with the primary account.
+        raw_iter: Iterable[Any] = []
+        for method in method_names:
             fn = getattr(sdk.account_data, method, None)
             if fn is None:
                 continue
             try:
-                raw_iter = (
-                    fn(real, date_range)
-                    if callable(fn) else fn
+                raw_iter = self._invoke_vendor_method(
+                    fn, primary_real, *extra_args,
                 )
-            except TypeError:
-                # Some signatures take just the account number.
-                try:
-                    raw_iter = fn(real) if callable(fn) else fn
-                except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(_sanitize_exception(exc)) from None
+            except _VendorCallFailed as exc:
+                raise RuntimeError(str(exc)) from None
+            break
+        rows = list(raw_iter or [])
+
+        # One log line per call so you can see this in production logs:
+        # how many rows we got, whether vendor tagged them with
+        # account ids, what types they look like.
+        tagged_count = 0
+        for raw in rows[:5]:  # only sample for the log line
+            row_account = self._extract_row_account_id(raw)
+            if row_account:
+                tagged_count += 1
+        logger.info(
+            "[firstrade] vendor returned %d rows from %s; "
+            "%d/%d sample rows are tagged with an account id",
+            len(rows), method_names[0], tagged_count, min(5, len(rows)),
+        )
+
+        results: List[Any] = []
+        for raw in rows:
+            row_account = self._extract_row_account_id(raw)
+            if row_account and row_account in real_to_meta:
+                ah, l4, al = real_to_meta[row_account]
+            else:
+                # Vendor didn't tag the row — fall back to primary.
+                ah, l4, al = primary_hash, primary_last4, primary_alias
+            # Apply user filter AFTER dispatch so users can
+            # request ``account_alias`` and still get the right rows.
+            if wanted is not None and wanted not in {
+                ah.lower(), l4.lower(), al.lower(),
+            }:
+                continue
+            try:
+                dto = row_to_dto(raw, ah, l4, al)
             except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(_sanitize_exception(exc)) from None
-            for raw in list(raw_iter or []):
-                raw_id = str(
-                    _first_present(
-                        raw,
-                        "transaction_id",
-                        "transactionId",
-                        "id",
-                        "TransactionId",
-                    )
-                    or ""
+                logger.warning(
+                    "[firstrade] row → DTO conversion failed: %s",
+                    _sanitize_exception(exc),
                 )
-                results.append(
-                    BrokerTransaction(
-                        broker=self.BROKER_NAME,
-                        account_hash=account_hash,
-                        account_last4=last4,
-                        account_alias=alias,
-                        transaction_id_hash=(
-                            hash_broker_id(raw_id, salt) if raw_id else ""
-                        ),
-                        symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
-                        transaction_type=_first_present(
-                            raw, "type", "Type", "transaction_type", "action",
-                        ),
-                        trade_date=str(
-                            _first_present(raw, "trade_date", "TradeDate", "date") or ""
-                        ) or None,
-                        settle_date=str(
-                            _first_present(raw, "settle_date", "SettleDate") or ""
-                        ) or None,
-                        amount=_to_float(
-                            _first_present(raw, "amount", "Amount", "net_amount")
-                        ),
-                        quantity=_to_float(
-                            _first_present(raw, "quantity", "Quantity", "qty")
-                        ),
-                        currency=_first_present(raw, "currency", "Currency") or "USD",
-                        raw_payload=_as_dict(raw),
-                    )
-                )
-            return results
+                continue
+            if dto is not None:
+                results.append(dto)
         return results
+
+    @staticmethod
+    def _invoke_vendor_method(fn, real, *extra):
+        """Call vendor ``fn(real, *extra)`` with graceful fallbacks for
+        signatures that take fewer args, that return non-iterables,
+        or that are bare attributes (not callables)."""
+        if not callable(fn):
+            return fn or []
+        for args in ((real, *extra), (real,), ()):
+            try:
+                return fn(*args)
+            except TypeError:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                raise _VendorCallFailed(_sanitize_exception(exc)) from None
+        # Every signature attempt raised TypeError — surface that.
+        raise _VendorCallFailed(
+            "vendor method signature did not match any of (real, *extra) / (real,) / ()"
+        )
+
+    @staticmethod
+    def _extract_row_account_id(raw: Any) -> str:
+        """Pull the vendor-side account id out of a raw position / order /
+        transaction row, BEFORE redaction strips it. Empty when absent."""
+        candidate = _first_present(
+            raw,
+            "account",
+            "account_number",
+            "accountNo",
+            "accountNumber",
+            "accountID",
+            "account_id",
+            "AcctNumber",
+            "acct_number",
+        )
+        if candidate is None:
+            return ""
+        return str(candidate).strip()
+
+    # -----------------------------------------------------------------
+    # row → DTO mappers (used by the new pipeline; redaction applied
+    # via ``_as_dict`` inside ``raw_payload``).
+    # -----------------------------------------------------------------
+
+    def _raw_to_position(
+        self, raw: Any, account_hash: str, last4: str, alias: str,
+    ) -> BrokerPosition:
+        # Day-change candidates — the vendor SDK has churned through
+        # several names; we try the common ones in order. If the
+        # vendor returns ``last_price`` + ``prev_close`` only (no
+        # pre-computed change), we derive day_change ourselves below.
+        day_change = _to_float(
+            _first_present(
+                raw,
+                "day_change",
+                "dayChange",
+                "DayChange",
+                "change",
+                "Change",
+                "change_amount",
+                "ChangeAmount",
+                "net_change",
+            )
+        )
+        day_change_pct = _to_float(
+            _first_present(
+                raw,
+                "day_change_pct",
+                "dayChangePct",
+                "DayChangePercent",
+                "change_pct",
+                "ChangePercent",
+                "ChangePct",
+                "percent_change",
+            )
+        )
+        last_price = _to_float(
+            _first_present(raw, "last_price", "LastPrice", "price")
+        )
+        prev_close = _to_float(
+            _first_present(
+                raw, "prev_close", "previousClose", "PreviousClose",
+            )
+        )
+        # Fallbacks: derive from last/prev when vendor didn't supply.
+        if day_change is None and last_price is not None and prev_close:
+            day_change = last_price - prev_close
+        if (
+            day_change_pct is None
+            and last_price is not None
+            and prev_close
+        ):
+            try:
+                day_change_pct = (last_price - prev_close) / prev_close * 100.0
+            except ZeroDivisionError:
+                day_change_pct = None
+        return BrokerPosition(
+            broker=self.BROKER_NAME,
+            account_hash=account_hash,
+            account_last4=last4,
+            account_alias=alias,
+            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or ""),
+            quantity=_to_float(
+                _first_present(raw, "quantity", "Quantity", "qty", "shares")
+            ),
+            market_value=_to_float(
+                _first_present(raw, "market_value", "MarketValue", "value")
+            ),
+            avg_cost=_to_float(
+                _first_present(raw, "avg_cost", "AvgCost", "average_cost")
+            ),
+            last_price=last_price,
+            unrealized_pnl=_to_float(
+                _first_present(raw, "unrealized_pnl", "UnrealizedPnl", "pnl")
+            ),
+            day_change=day_change,
+            day_change_pct=day_change_pct,
+            currency=_first_present(raw, "currency", "Currency") or "USD",
+            as_of=_now_iso(),
+            raw_payload=_as_dict(raw),
+        )
+
+    def _raw_to_order(
+        self, raw: Any, account_hash: str, last4: str, alias: str,
+    ) -> BrokerOrder:
+        salt = self._salt()
+        raw_id = str(
+            _first_present(raw, "order_id", "orderId", "id", "OrderId") or ""
+        )
+        return BrokerOrder(
+            broker=self.BROKER_NAME,
+            account_hash=account_hash,
+            account_last4=last4,
+            account_alias=alias,
+            order_id_hash=hash_broker_id(raw_id, salt) if raw_id else "",
+            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
+            order_status=_first_present(raw, "status", "Status", "order_status"),
+            order_side=_first_present(raw, "side", "Side", "action"),
+            order_type=_first_present(raw, "order_type", "OrderType", "type"),
+            order_quantity=_to_float(
+                _first_present(raw, "quantity", "Quantity", "qty")
+            ),
+            filled_quantity=_to_float(
+                _first_present(raw, "filled", "Filled", "filled_quantity")
+            ),
+            limit_price=_to_float(
+                _first_present(raw, "limit_price", "LimitPrice", "price")
+            ),
+            as_of=_now_iso(),
+            raw_payload=_as_dict(raw),
+        )
+
+    def _raw_to_transaction(
+        self, raw: Any, account_hash: str, last4: str, alias: str,
+    ) -> BrokerTransaction:
+        salt = self._salt()
+        raw_id = str(
+            _first_present(
+                raw,
+                "transaction_id",
+                "transactionId",
+                "id",
+                "TransactionId",
+            )
+            or ""
+        )
+        return BrokerTransaction(
+            broker=self.BROKER_NAME,
+            account_hash=account_hash,
+            account_last4=last4,
+            account_alias=alias,
+            transaction_id_hash=(
+                hash_broker_id(raw_id, salt) if raw_id else ""
+            ),
+            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
+            transaction_type=_first_present(
+                raw, "type", "Type", "transaction_type", "action",
+            ),
+            trade_date=str(
+                _first_present(raw, "trade_date", "TradeDate", "date") or ""
+            ) or None,
+            settle_date=str(
+                _first_present(raw, "settle_date", "SettleDate") or ""
+            ) or None,
+            amount=_to_float(
+                _first_present(raw, "amount", "Amount", "net_amount")
+            ),
+            quantity=_to_float(
+                _first_present(raw, "quantity", "Quantity", "qty")
+            ),
+            currency=_first_present(raw, "currency", "Currency") or "USD",
+            raw_payload=_as_dict(raw),
+        )
+
+    # ---- legacy per-account fetcher kept for compatibility ----------
+    # ``_fetch_balance_for`` is still called from ``get_balances`` via
+    # ``_iter_per_account`` because balances genuinely differ per
+    # sub-account (cash account ≠ margin account ≠ IRA cash).
+    #
+    # The old ``_fetch_positions_for`` / ``_fetch_orders_for`` /
+    # ``_fetch_transactions_for`` are intentionally removed — the new
+    # ``_fetch_once_and_dispatch`` replaces them and avoids the
+    # N×duplication bug that produced "5 accounts, 15 positions".
 
     # ------------------------------------------------------------------
     # Snapshot composition
