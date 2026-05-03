@@ -808,6 +808,12 @@ class Config:
     prefetch_realtime_quotes: bool = True
 
     # === 数据库配置 ===
+    # ``database_url`` (env: DATABASE_URL) — 外部数据库的完整 SQLAlchemy URL。
+    # 支持 ``postgresql://``, ``postgresql+psycopg://``, ``postgres://``
+    # （后者会被规范化为 ``postgresql://``，兼容 Cloud SQL / Heroku 风格）。
+    # 设置后 ``database_path`` 仅在 URL 解析失败时作为 fallback。
+    # 留空（默认）则使用本地 SQLite（``database_path``）—— 适合本地开发 / 测试。
+    database_url: str = ""
     database_path: str = "./data/stock_analysis.db"
     sqlite_wal_enabled: bool = True
     sqlite_busy_timeout_ms: int = 5000
@@ -1528,6 +1534,7 @@ class Config:
             ),
             md2img_engine=cls._parse_md2img_engine(os.getenv('MD2IMG_ENGINE', 'wkhtmltoimage')),
             prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
+            database_url=(os.getenv('DATABASE_URL') or '').strip(),
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             sqlite_wal_enabled=os.getenv('SQLITE_WAL_ENABLED', 'true').lower() == 'true',
             sqlite_busy_timeout_ms=parse_env_int(
@@ -2601,11 +2608,22 @@ class Config:
         return [issue.message for issue in self.validate_structured()]
     
     def get_db_url(self) -> str:
+        """获取 SQLAlchemy 数据库连接 URL。
+
+        优先使用 ``DATABASE_URL`` 环境变量（外部 Postgres / MySQL 等）。
+        留空则回落到本地 SQLite（``database_path``），并自动创建父目录。
+
+        ``postgres://`` 这种历史前缀（Heroku / Cloud SQL Connector 早期 doc
+        都用过）会被规范化为 ``postgresql://``，因为 SQLAlchemy 2.x
+        不再接受裸 ``postgres://``。
         """
-        获取 SQLAlchemy 数据库连接 URL
-        
-        自动创建数据库目录（如果不存在）
-        """
+        url = (self.database_url or "").strip()
+        if url:
+            # 规范化历史前缀
+            if url.startswith("postgres://"):
+                url = "postgresql://" + url[len("postgres://"):]
+            return url
+        # SQLite fallback
         db_path = Path(self.database_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{db_path.absolute()}"
