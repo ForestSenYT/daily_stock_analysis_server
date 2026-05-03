@@ -60,23 +60,27 @@ def _install_fake_sdk(*, need_code: bool = False, accounts=None,
                       transactions=None):
     """Inject a stub ``firstrade.account`` module into sys.modules.
 
-    Mirrors the **real** ``firstrade==0.0.38`` API:
+    Mirrors the **real** ``firstrade==0.0.38`` API as confirmed by
+    production diagnostic logs:
       * ``account_numbers`` is the canonical list of account-number
         strings (NOT ``all_accounts``, which is HTTP response wrapper
         metadata in the live SDK).
-      * The read methods are side-effect-driven: calling
-        ``get_positions(account=X)`` populates
-        ``account_data.securities_held``; calling
-        ``get_account_balances(account=X)`` populates
-        ``account_data.account_balances``; etc. The method's return
-        value is informational (e.g. ticker list), not the details.
+      * Read methods return HTTP response envelopes:
+            ``get_positions(account=X)`` →
+                ``{"statusCode", "account", "items": [position_dicts],
+                  "total_market_value", ...}``
+            ``get_account_balances(account=X)`` →
+                ``{"statusCode", "result": {balance_fields}, ...}``
+            ``get_orders(account=X)`` →
+                ``{"items": [order_dicts], ...}``
+            ``get_account_history(account=X)`` →
+                ``{"items": [tx_dicts], ...}``
 
-    The fixture accepts the same convenience kwargs as before but
-    rewires them to the side-effect contract:
+    Convenience kwargs:
       * ``accounts``: list of account-number strings (default 1)
-      * ``positions``: list of detail dicts; auto-keyed by ``symbol``
-      * ``balance``: detail dict (or float)
-      * ``orders`` / ``transactions``: lists of detail dicts
+      * ``positions``: list of detail dicts (returned under ``items``)
+      * ``balance``: detail dict (returned under ``result``)
+      * ``orders`` / ``transactions``: lists of detail dicts (under ``items``)
     """
     if accounts is None:
         account_numbers = ["112233445566"]
@@ -103,49 +107,57 @@ def _install_fake_sdk(*, need_code: bool = False, accounts=None,
     ft_session_instance.login = MagicMock(return_value=need_code)
     ft_session_instance.login_two = MagicMock(return_value=True)
 
-    # Real SDK stores no detail dicts on construction; details only
-    # appear after the corresponding side-effect method is called.
-    # Use a plain class so getattr() doesn't auto-spawn MagicMock attrs
-    # for ``securities_held`` etc. (which would defeat our absence
-    # checks in mappers).
+    # Plain class (not MagicMock) so getattr() doesn't auto-spawn fake
+    # attributes — keeps the contract honest.
     class _FakeAccountData:
         pass
     account_data_instance = _FakeAccountData()
     account_data_instance.account_numbers = list(account_numbers)
-    # ``all_accounts`` exists in the real SDK but as response metadata —
-    # we deliberately do NOT use it as the iteration anchor anymore.
     account_data_instance.all_accounts = {"statusCode": 200}
     account_data_instance.user_info = {"sid": "<redacted>"}
 
-    # Index positions by symbol — that's the live SDK's
-    # ``securities_held`` key shape.
-    sec_held = {}
-    for p in positions:
-        symbol = (p.get("symbol") or p.get("ticker") or "").upper()
-        if symbol:
-            sec_held[symbol] = p
+    def _positions_envelope(account=None, **_kw):
+        return {
+            "statusCode": 200,
+            "account": account,
+            "items": list(positions),
+            "total_market_value": sum(
+                float(p.get("market_value") or 0) for p in positions
+            ),
+            "total_daychange_amount": 0.0,
+            "total_gainloss": 0.0,
+            "pagination": {"total": len(positions), "page": 1},
+        }
 
-    def _populate_securities_held(account=None, **_kw):
-        """Mirror SDK side-effect: write to securities_held + return ticker list."""
-        account_data_instance.securities_held = dict(sec_held)
-        return list(sec_held.keys())
+    def _balances_envelope(account=None, **_kw):
+        return {
+            "statusCode": 200,
+            "message": "ok",
+            "result": dict(balance),
+            "error": None,
+        }
 
-    def _populate_balances(account=None, **_kw):
-        account_data_instance.account_balances = {account: dict(balance)}
-        return dict(balance)
+    def _orders_envelope(account=None, **_kw):
+        return {
+            "statusCode": 200,
+            "account": account,
+            "items": list(orders),
+            "pagination": {"total": len(orders), "page": 1},
+        }
 
-    def _populate_orders(account=None, **_kw):
-        account_data_instance.orders = list(orders)
-        return list(orders)
+    def _history_envelope(account=None, **_kw):
+        return {
+            "statusCode": 200,
+            "items": list(transactions),
+            "page": 1,
+            "per_page": 50,
+            "total": len(transactions),
+        }
 
-    def _populate_history(account=None, **_kw):
-        account_data_instance.account_history = list(transactions)
-        return list(transactions)
-
-    account_data_instance.get_positions = MagicMock(side_effect=_populate_securities_held)
-    account_data_instance.get_account_balances = MagicMock(side_effect=_populate_balances)
-    account_data_instance.get_orders = MagicMock(side_effect=_populate_orders)
-    account_data_instance.get_account_history = MagicMock(side_effect=_populate_history)
+    account_data_instance.get_positions = MagicMock(side_effect=_positions_envelope)
+    account_data_instance.get_account_balances = MagicMock(side_effect=_balances_envelope)
+    account_data_instance.get_orders = MagicMock(side_effect=_orders_envelope)
+    account_data_instance.get_account_history = MagicMock(side_effect=_history_envelope)
 
     FTSession = MagicMock(return_value=ft_session_instance)
     FTAccountData = MagicMock(return_value=account_data_instance)
@@ -475,18 +487,19 @@ class AccountIterableShapeTests(unittest.TestCase):
 # 4) Module-import safety
 # =====================================================================
 
-class SideEffectContractTests(unittest.TestCase):
-    """Regression tests pinning the ``firstrade==0.0.38`` side-effect
-    contract. The vendor's ``get_positions(account=X)`` /
-    ``get_account_balances(account=X)`` / ``get_orders(account=X)``
-    methods are NOT pure — they don't return detail dicts; they WRITE
-    onto attributes of ``FTAccountData`` and return only a thin
-    summary. If our client ever forgets to read from those side-effect
-    dicts, the UI silently shows dashes everywhere — exactly the bug
-    that motivated this refactor.
+class EnvelopeContractTests(unittest.TestCase):
+    """Regression tests pinning the ``firstrade==0.0.38`` HTTP envelope
+    contract. The vendor's read methods return dict envelopes:
+      * ``get_positions(account=X)``  → ``{"items": [position_dicts], ...}``
+      * ``get_account_balances(account=X)`` → ``{"result": {fields}, ...}``
+      * ``get_orders(account=X)``     → ``{"items": [order_dicts], ...}``
+      * ``get_account_history(account=X)`` → ``{"items": [tx_dicts], ...}``
 
-    Each test below exercises one phase of the contract and asserts
-    real fields land on the BrokerPosition / BrokerBalance / etc.
+    The earlier "0 positions / 10 fake orders / 7 fake transactions"
+    bug came from reading non-existent dynamic attrs and falling back
+    to ``list(envelope.values())``, which exposed envelope metadata
+    (``statusCode``, ``pagination``, …) as fake rows. These tests
+    pin the new contract so any reversion fails loudly.
     """
 
     def setUp(self) -> None:
@@ -498,17 +511,17 @@ class SideEffectContractTests(unittest.TestCase):
             accounts=["67704947"],
             positions=[
                 {"symbol": "AAPL", "quantity": 10, "market_value": 2800.70,
-                 "avg_cost": 150.0, "last_price": 280.07,
-                 "day_change": 8.72, "day_change_pct": 3.21,
-                 "unrealized_pnl": 1300.7},
+                 "cost_basis": 150.0, "last_price": 280.07,
+                 "daychange_amount": 8.72, "daychange_percent": 3.21,
+                 "gainloss": 1300.7},
                 {"symbol": "AVGO", "quantity": 5, "market_value": 2101.35,
-                 "avg_cost": 200.0, "last_price": 420.27,
-                 "day_change": 2.84, "day_change_pct": 0.68,
-                 "unrealized_pnl": 1101.35},
+                 "cost_basis": 200.0, "last_price": 420.27,
+                 "daychange_amount": 2.84, "daychange_percent": 0.68,
+                 "gainloss": 1101.35},
                 {"symbol": "QQQM", "quantity": 50, "market_value": 13870.50,
-                 "avg_cost": 200.0, "last_price": 277.41,
-                 "day_change": 2.51, "day_change_pct": 0.91,
-                 "unrealized_pnl": 3870.5},
+                 "cost_basis": 200.0, "last_price": 277.41,
+                 "daychange_amount": 2.51, "daychange_percent": 0.91,
+                 "gainloss": 3870.5},
             ],
             balance={
                 "cash": 5000.0,
@@ -528,44 +541,32 @@ class SideEffectContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         _uninstall_fake_sdk()
 
-    def test_get_positions_invokes_side_effect_and_reads_details(self) -> None:
+    def test_get_positions_reads_items_from_envelope(self) -> None:
         """``get_positions(account=X)`` MUST be called as a kwarg AND
-        the client MUST then read ``account_data.securities_held`` for
-        the actual detail dicts."""
+        the client MUST read the per-row dicts from ``ret["items"]``."""
         sdk_account_data = self.client._sdk.account_data
-
-        # Sanity: securities_held doesn't exist yet (the real SDK
-        # creates it lazily on first ``get_positions`` call).
-        self.assertFalse(hasattr(sdk_account_data, "securities_held"))
 
         positions = self.client.get_positions()
 
-        # The mocked SDK populated securities_held during the call.
-        self.assertTrue(hasattr(sdk_account_data, "securities_held"))
-        # ``get_positions`` was invoked with account= kwarg.
         sdk_account_data.get_positions.assert_called_with(account="67704947")
-        # Three real position objects with all fields populated.
         self.assertEqual(len(positions), 3)
         symbols = {p.symbol for p in positions}
         self.assertEqual(symbols, {"AAPL", "AVGO", "QQQM"})
-        # Pin the AAPL row — every field non-None proves the
-        # side-effect-aware read is wired correctly.
+        # Pin the AAPL row — every vendor-named field maps correctly.
         aapl = next(p for p in positions if p.symbol == "AAPL")
         self.assertEqual(aapl.quantity, 10.0)
         self.assertEqual(aapl.market_value, 2800.70)
         self.assertEqual(aapl.last_price, 280.07)
-        self.assertEqual(aapl.avg_cost, 150.0)
-        self.assertEqual(aapl.day_change, 8.72)
-        self.assertEqual(aapl.day_change_pct, 3.21)
-        self.assertEqual(aapl.unrealized_pnl, 1300.7)
+        self.assertEqual(aapl.avg_cost, 150.0)         # from cost_basis
+        self.assertEqual(aapl.day_change, 8.72)         # from daychange_amount
+        self.assertEqual(aapl.day_change_pct, 3.21)     # from daychange_percent
+        self.assertEqual(aapl.unrealized_pnl, 1300.7)   # from gainloss
 
-    def test_get_balances_invokes_side_effect_and_reads_dict(self) -> None:
+    def test_get_balances_reads_result_from_envelope(self) -> None:
         sdk_account_data = self.client._sdk.account_data
-        self.assertFalse(hasattr(sdk_account_data, "account_balances")
-                         and isinstance(getattr(sdk_account_data, "account_balances", None), dict)
-                         and "67704947" in getattr(sdk_account_data, "account_balances", {}))
 
         balances = self.client.get_balances()
+
         sdk_account_data.get_account_balances.assert_called_with(account="67704947")
         self.assertEqual(len(balances), 1)
         b = balances[0]
@@ -583,18 +584,33 @@ class SideEffectContractTests(unittest.TestCase):
         self.assertEqual(len(accounts), 1)
         self.assertEqual(accounts[0].account_last4, "4947")
 
-    def test_get_positions_with_no_held_attr_returns_empty(self) -> None:
-        """If the SDK returns the ticker list but never populates
-        ``securities_held`` (e.g. broken SDK version), positions should
-        be empty rather than blowing up."""
-        # Override the populating side-effect to return a ticker list
-        # WITHOUT writing to securities_held.
+    def test_get_orders_does_not_inflate_envelope_metadata(self) -> None:
+        """Regression for the "10 fake orders" bug: when the envelope
+        had ``statusCode`` / ``pagination`` etc. as keys, the previous
+        code did ``list(envelope.values())`` and emitted them as
+        fake order rows. Verify that reading from a populated envelope
+        gives exactly one order — the one we put in ``items``."""
+        orders = self.client.get_orders()
+        self.assertEqual(len(orders), 1)
+
+    def test_get_transactions_does_not_inflate_envelope_metadata(self) -> None:
+        """Regression for the "7 fake transactions" bug. With an empty
+        ``items`` list, no transactions should be emitted regardless
+        of how many envelope-level keys exist."""
+        # The default fixture has no transactions.
+        txs = self.client.get_transactions()
+        self.assertEqual(len(txs), 0)
+
+    def test_get_positions_handles_bare_ticker_strings(self) -> None:
+        """Defensive: some SDK builds put bare ticker strings inside
+        ``items`` rather than detail dicts. The client must preserve
+        the symbol but leave detail fields as None."""
         sdk_ad = self.client._sdk.account_data
-        if hasattr(sdk_ad, "securities_held"):
-            del sdk_ad.securities_held
-        sdk_ad.get_positions.side_effect = lambda account=None, **_: ["AAPL"]
+        sdk_ad.get_positions.side_effect = lambda account=None, **_: {
+            "statusCode": 200,
+            "items": ["AAPL"],  # bare string, not dict
+        }
         positions = self.client.get_positions()
-        # Symbol shows up but details are all None — defensive degrade.
         self.assertEqual(len(positions), 1)
         self.assertEqual(positions[0].symbol, "AAPL")
         self.assertIsNone(positions[0].quantity)

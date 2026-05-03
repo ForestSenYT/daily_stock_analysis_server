@@ -417,15 +417,15 @@ class FirstradeReadOnlyClient:
     ) -> List[BrokerBalance]:
         """Read per-account balances.
 
-        ``firstrade==0.0.38`` exposes balances in two places:
-          * ``account_data.account_balances`` — populated lazily after
-            ``get_account_balances(account=X)`` is called.
-          * ``account_data.get_balance_overview()`` — instant
-            cross-account view (single dict).
-        We call the per-account method to ensure the dict is populated,
-        then read it back keyed by the masked account_hash. The method
-        itself returns the same float we'd get from ``account_balances``,
-        so we don't need its return value.
+        Vendor's ``get_account_balances(account=X)`` returns an HTTP
+        envelope dict::
+
+            {"statusCode": 200, "message": "...", "result": {...balance fields...}, "error": ...}
+
+        The actual balance fields live under ``result``. Production
+        diagnostic logs confirmed this shape — the earlier "0 positions"
+        regression came from reading non-existent dynamic attributes
+        instead of the return value.
         """
         sdk = self._require_logged_in()
         if sdk is None:
@@ -435,14 +435,13 @@ class FirstradeReadOnlyClient:
         for real, account_hash, last4, alias in self._resolve_target_accounts(
             account_hash_or_alias
         ):
-            # Trigger SDK to populate / refresh self.account_balances[real].
-            self._invoke_side_effect(
+            ret = self._invoke_read_method(
                 ad,
                 method_name="get_account_balances",
                 account=real,
                 phase_label="balances",
             )
-            balance_payload = self._read_account_balance_detail(ad, real)
+            balance_payload = self._extract_response_dict(ret, key="result")
             balances.append(self._payload_to_balance(
                 balance_payload, account_hash, last4, alias,
             ))
@@ -453,13 +452,17 @@ class FirstradeReadOnlyClient:
     ) -> List[BrokerPosition]:
         """Read per-account positions.
 
-        Vendor design: ``get_positions(account=X)`` triggers an HTTP
-        call and writes the detailed position dicts into
-        ``account_data.securities_held`` (a dict keyed by symbol, value
-        is the per-symbol detail dict). The method itself only returns
-        the **list of ticker strings** — useless without reading the
-        side-effect dict. This is the bug that caused the earlier
-        UI-shows-all-dashes regression.
+        Vendor's ``get_positions(account=X)`` returns an HTTP envelope
+        dict::
+
+            {"statusCode": 200, "account": "...", "items": [position_dicts],
+             "total_market_value": ..., "total_daychange_amount": ...,
+             "total_gainloss": ..., "pagination": {...}, ...}
+
+        Each row in ``items`` is a per-position detail dict. We pulled
+        this shape directly from production logs after a long debugging
+        session that mistook earlier SDK builds (which side-effect-
+        populated ``securities_held``) for the current 0.0.38 contract.
         """
         sdk = self._require_logged_in()
         if sdk is None:
@@ -469,41 +472,38 @@ class FirstradeReadOnlyClient:
         for real, account_hash, last4, alias in self._resolve_target_accounts(
             account_hash_or_alias
         ):
-            ticker_list = self._invoke_side_effect(
+            ret = self._invoke_read_method(
                 ad,
                 method_name="get_positions",
                 account=real,
                 phase_label="positions",
             )
-            details_map = self._read_securities_held(ad, real)
-            # Decide which symbol list to iterate. Prefer the SDK's
-            # return value (canonical "current holdings"); fall back
-            # to ``securities_held`` keys if the SDK returned None.
-            symbols: List[str]
-            if isinstance(ticker_list, (list, tuple)) and ticker_list:
-                symbols = [str(s).strip() for s in ticker_list if s]
-            elif isinstance(details_map, dict):
-                symbols = [str(s).strip() for s in details_map.keys() if s]
-            else:
-                symbols = []
-            for symbol in symbols:
-                detail = (
-                    details_map.get(symbol)
-                    if isinstance(details_map, dict) else {}
-                )
-                if not isinstance(detail, dict):
-                    detail = {}
-                positions.append(self._payload_to_position(
-                    symbol, detail, account_hash, last4, alias,
-                ))
+            for item in self._extract_response_items(ret):
+                if isinstance(item, dict):
+                    symbol = str(
+                        _first_present(item, "symbol", "ticker", "sym") or ""
+                    ).strip()
+                    positions.append(self._payload_to_position(
+                        symbol, item, account_hash, last4, alias,
+                    ))
+                else:
+                    # Defensive: some SDK builds return bare ticker
+                    # strings inside ``items``. Preserve the symbol;
+                    # detail fields stay None.
+                    positions.append(self._payload_to_position(
+                        str(item).strip(), {}, account_hash, last4, alias,
+                    ))
         return positions
 
     def get_orders(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerOrder]:
-        """Read per-account orders. Same side-effect pattern as
-        positions: the method populates ``account_data.orders``
-        (dict / list) and returns a thin reference."""
+        """Read per-account orders.
+
+        Vendor's ``get_orders(account=X)`` returns
+        ``{"statusCode": ..., "account": ..., "items": [order_dicts],
+        "pagination": ..., ...}``. Per-order rows live under ``items``.
+        """
         sdk = self._require_logged_in()
         if sdk is None:
             return []
@@ -512,14 +512,13 @@ class FirstradeReadOnlyClient:
         for real, account_hash, last4, alias in self._resolve_target_accounts(
             account_hash_or_alias
         ):
-            order_ref = self._invoke_side_effect(
+            ret = self._invoke_read_method(
                 ad,
                 method_name="get_orders",
                 account=real,
                 phase_label="orders",
             )
-            order_rows = self._read_orders(ad, real, order_ref)
-            for raw in order_rows:
+            for raw in self._extract_response_items(ret):
                 orders.append(self._payload_to_order(
                     raw, account_hash, last4, alias,
                 ))
@@ -530,6 +529,11 @@ class FirstradeReadOnlyClient:
         account_hash_or_alias: Optional[str] = None,
         date_range: str = "today",
     ) -> List[BrokerTransaction]:
+        """Read per-account transaction history.
+
+        Vendor's ``get_account_history(account=X)`` returns
+        ``{"statusCode": ..., "items": [transaction_dicts], "page": ..., ...}``.
+        """
         normalized = (date_range or "today").strip().lower()
         if normalized not in _VALID_DATE_RANGES:
             logger.warning(
@@ -552,15 +556,14 @@ class FirstradeReadOnlyClient:
         for real, account_hash, last4, alias in self._resolve_target_accounts(
             account_hash_or_alias
         ):
-            history_ref = self._invoke_side_effect(
+            ret = self._invoke_read_method(
                 ad,
                 method_name="get_account_history",
                 account=real,
                 phase_label="history",
                 extra_kwargs={"period": normalized},
             )
-            tx_rows = self._read_history(ad, real, history_ref)
-            for raw in tx_rows:
+            for raw in self._extract_response_items(ret):
                 results.append(self._payload_to_transaction(
                     raw, account_hash, last4, alias,
                 ))
@@ -779,25 +782,28 @@ class FirstradeReadOnlyClient:
     # ------------------------------------------------------------------
 
     # =================================================================
-    # NEW pipeline — side-effect-aware fetchers (firstrade==0.0.38)
+    # Read pipeline (firstrade==0.0.38)
     # =================================================================
     #
-    # The MaxxRK/firstrade-api library doesn't return detail dicts from
-    # its read methods — instead it WRITES the details onto attributes
-    # of the FTAccountData instance:
+    # The MaxxRK/firstrade-api library's read methods return HTTP
+    # response envelopes — dicts shaped like::
     #
-    #   data.get_positions(account=X)       → returns ticker[],
-    #                                         writes data.securities_held
-    #   data.get_account_balances(account=X) → writes data.account_balances
-    #   data.get_orders(account=X)          → writes data.orders / data.order_history
-    #   data.get_account_history(account=X) → writes data.account_history
+    #   data.get_positions(account=X)       → {"statusCode", "account",
+    #                                          "items": [position_dicts],
+    #                                          "total_market_value", ...}
+    #   data.get_account_balances(account=X) → {"statusCode", "result":
+    #                                           {balance_fields}, ...}
+    #   data.get_orders(account=X)          → {"items": [order_dicts], ...}
+    #   data.get_account_history(account=X) → {"items": [tx_dicts], ...}
     #
-    # Calling these methods to "fetch" without then reading the
-    # side-effect attribute is the classic bug — that's exactly what
-    # made the UI show all dashes earlier. The helpers below enforce
-    # the right pattern.
+    # The per-row data lives inside ``items`` (lists) or ``result``
+    # (single detail dict for balances). The earlier "0 positions /
+    # 10 fake orders / 7 fake transactions" regression came from
+    # reading non-existent dynamic attrs and falling back to
+    # ``list(envelope.values())`` which exposed envelope metadata as
+    # fake rows.
 
-    def _invoke_side_effect(
+    def _invoke_read_method(
         self,
         account_data: Any,
         *,
@@ -806,14 +812,13 @@ class FirstradeReadOnlyClient:
         phase_label: str,
         extra_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Invoke a vendor read method and return whatever it returned.
+        """Invoke a vendor read method and return the response envelope.
 
-        We try ``fn(account=X, **extra_kwargs)`` first — that's the
-        canonical signature in 0.0.38. If the SDK signature differs we
-        fall back to positional. Any exception is sanitised and logged
-        with the masked account; the call is treated as best-effort
-        (returns None) so a single broken endpoint doesn't poison
-        every other read.
+        Tries ``fn(account=X, **extra_kwargs)`` first (canonical 0.0.38
+        signature); falls back to positional if the SDK rejects
+        keyword args. Errors are sanitised and the call is best-effort
+        (returns ``None``) so one failing endpoint doesn't poison the
+        rest of the sync.
         """
         fn = getattr(account_data, method_name, None)
         if fn is None or not callable(fn):
@@ -828,7 +833,6 @@ class FirstradeReadOnlyClient:
         try:
             ret = fn(**kwargs)
         except TypeError as exc:
-            # Signature drift — try positional.
             logger.debug(
                 "[firstrade] %s: kwarg call hit TypeError (%s); "
                 "retrying positional",
@@ -849,101 +853,66 @@ class FirstradeReadOnlyClient:
                 phase_label, method_name, last_4, _sanitize_exception(exc),
             )
             return None
-        # One-shot diagnostic dump after the side-effect — lets us see
-        # exactly which dynamic attribute holds the details on this SDK
-        # version. We rate-limit via class-level set so logs don't spam.
+        # One-shot diagnostic dump so we can spot SDK shape drift in
+        # production without redeploying. Rate-limited by phase label.
         self._log_post_call_attrs(account_data, phase_label, account, ret)
         return ret
 
     @staticmethod
-    def _read_securities_held(account_data: Any, account: str) -> Dict[str, Any]:
-        """Return the per-symbol detail map populated by
-        ``get_positions(account=X)``. Tolerates two known shapes:
-          1. ``securities_held = {symbol: detail_dict, ...}`` (current 0.0.38)
-          2. ``securities_held = {account_number: {symbol: detail}}``
-             (older variants)
+    def _extract_response_items(response: Any) -> List[Any]:
+        """Pull the per-row list out of a vendor HTTP envelope.
+
+        Accepts a handful of variations defensively:
+          * already-a-list → returned as-is
+          * dict with ``items`` / ``data`` / ``rows`` / ``results`` →
+            return that list
+          * anything else → ``[]``
+        We deliberately do NOT fall back to ``list(dict.values())`` —
+        that's exactly the bug that exposed envelope metadata
+        (``statusCode``, ``pagination``, …) as fake rows.
         """
-        candidate = getattr(account_data, "securities_held", None)
-        if not isinstance(candidate, dict):
-            return {}
-        # Shape 2: keys look like account numbers (string of digits)
-        # AND values are themselves dicts → drill into the matching key.
-        if account in candidate and isinstance(candidate[account], dict):
-            inner = candidate[account]
-            # Inner is {symbol: detail}
-            return {str(k): v for k, v in inner.items()}
-        # Shape 1: keys are symbols.
-        return {str(k): v for k, v in candidate.items()}
+        if response is None:
+            return []
+        if isinstance(response, list):
+            return list(response)
+        if isinstance(response, dict):
+            for key in ("items", "data", "rows", "results"):
+                value = response.get(key)
+                if isinstance(value, list):
+                    return list(value)
+        return []
 
     @staticmethod
-    def _read_account_balance_detail(
-        account_data: Any, account: str,
+    def _extract_response_dict(
+        response: Any, key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Return the balance detail dict for ``account``.
+        """Pull a per-row detail dict out of a vendor HTTP envelope.
 
-        ``account_balances`` shapes we've seen:
-          1. ``{account_number: <float>}`` (single number — total value only)
-          2. ``{account_number: {field: value, ...}}`` (full detail dict)
-        We always return a dict so the mapper can use ``_first_present``
-        uniformly. For shape 1 we wrap the float as
-        ``{"total_value": <float>}``.
+        Used for ``get_account_balances`` whose detail lives under
+        ``result``. If ``key`` is set we descend into that key; if the
+        envelope already looks like a flat detail dict (it carries one
+        of the known balance hint fields) we return it unchanged.
         """
-        candidate = getattr(account_data, "account_balances", None)
-        if not isinstance(candidate, dict):
+        if response is None:
             return {}
-        per_acct = candidate.get(account)
-        if isinstance(per_acct, dict):
-            return per_acct
-        if isinstance(per_acct, (int, float)):
-            return {"total_value": float(per_acct)}
+        if not isinstance(response, dict):
+            return {}
+        if key is None:
+            return response
+        value = response.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, (int, float)):
+            return {"total_value": float(value)}
+        # Envelope but inner key absent — accept the outer dict as a
+        # flat detail dict if it carries any recognised balance field.
+        for hint in (
+            "cash", "buying_power", "buyingPower", "total_value",
+            "equity", "account_value", "net_account_value",
+        ):
+            if hint in response:
+                return response
         return {}
-
-    @staticmethod
-    def _read_orders(
-        account_data: Any, account: str, fallback_ref: Any,
-    ) -> List[Any]:
-        """Return order rows for ``account``. Tries (in order):
-          1. ``account_data.orders[account]`` (dict-of-list shape)
-          2. ``account_data.orders`` (flat list)
-          3. ``account_data.order_history[account]``
-          4. ``fallback_ref`` itself if it's a list (some SDKs return rows)
-        """
-        for attr_name in ("orders", "order_history"):
-            attr = getattr(account_data, attr_name, None)
-            if isinstance(attr, dict):
-                inner = attr.get(account)
-                if isinstance(inner, list):
-                    return list(inner)
-                if isinstance(inner, dict):
-                    return list(inner.values())
-            if isinstance(attr, list):
-                return list(attr)
-        if isinstance(fallback_ref, list):
-            return list(fallback_ref)
-        if isinstance(fallback_ref, dict):
-            return list(fallback_ref.values())
-        return []
-
-    @staticmethod
-    def _read_history(
-        account_data: Any, account: str, fallback_ref: Any,
-    ) -> List[Any]:
-        """Same idea as ``_read_orders`` but for transaction history."""
-        for attr_name in ("account_history", "history", "transactions"):
-            attr = getattr(account_data, attr_name, None)
-            if isinstance(attr, dict):
-                inner = attr.get(account)
-                if isinstance(inner, list):
-                    return list(inner)
-                if isinstance(inner, dict):
-                    return list(inner.values())
-            if isinstance(attr, list):
-                return list(attr)
-        if isinstance(fallback_ref, list):
-            return list(fallback_ref)
-        if isinstance(fallback_ref, dict):
-            return list(fallback_ref.values())
-        return []
 
     # Per-class one-shot logger to avoid spamming logs with the same
     # diagnostic dump on every sync.
@@ -1053,8 +1022,11 @@ class FirstradeReadOnlyClient:
         last4: str,
         alias: str,
     ) -> BrokerPosition:
-        # Same-day move — vendor field names probed in priority order;
-        # fall back to (last - prev_close) when nothing matches.
+        # Vendor 0.0.38 per-position field names (derived from the
+        # ``total_*`` aggregates visible in the envelope and confirmed
+        # via production diagnostic logs): ``daychange_amount``,
+        # ``daychange_percent``, ``gainloss``, ``gainloss_percent``,
+        # ``market_value``, ``cost_basis``.
         last_price = _to_float(
             _first_present(
                 detail, "last_price", "lastPrice", "price", "current_price",
@@ -1069,13 +1041,17 @@ class FirstradeReadOnlyClient:
         )
         day_change = _to_float(
             _first_present(
-                detail, "day_change", "dayChange", "change", "change_amount",
+                detail,
+                "daychange_amount", "daychangeAmount",  # vendor 0.0.38
+                "day_change", "dayChange", "change", "change_amount",
                 "net_change", "change_dollar",
             )
         )
         day_change_pct = _to_float(
             _first_present(
-                detail, "day_change_pct", "dayChangePct", "change_pct",
+                detail,
+                "daychange_percent", "daychangePercent",  # vendor 0.0.38
+                "day_change_pct", "dayChangePct", "change_pct",
                 "change_percent", "percent_change",
             )
         )
@@ -1096,7 +1072,7 @@ class FirstradeReadOnlyClient:
             account_last4=last4,
             account_alias=alias,
             symbol=str(
-                _first_present(detail, "symbol", "ticker") or symbol
+                _first_present(detail, "symbol", "ticker", "sym") or symbol
             ),
             quantity=_to_float(
                 _first_present(detail, "quantity", "qty", "shares", "amount")
@@ -1109,14 +1085,18 @@ class FirstradeReadOnlyClient:
             ),
             avg_cost=_to_float(
                 _first_present(
-                    detail, "avg_cost", "average_cost", "averageCost",
-                    "cost_basis", "cost", "avg_price", "average_price",
+                    detail,
+                    "cost_basis", "costBasis",  # vendor 0.0.38
+                    "avg_cost", "average_cost", "averageCost",
+                    "cost", "avg_price", "average_price",
                 )
             ),
             last_price=last_price,
             unrealized_pnl=_to_float(
                 _first_present(
-                    detail, "unrealized_pnl", "unrealizedPnl",
+                    detail,
+                    "gainloss", "gainLoss",  # vendor 0.0.38
+                    "unrealized_pnl", "unrealizedPnl",
                     "unrealized_gain_loss", "pnl", "gain_loss",
                 )
             ),
