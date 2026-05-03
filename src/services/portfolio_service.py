@@ -557,11 +557,27 @@ class PortfolioService:
                 ]
             )
 
+        # Bridge: append Firstrade live snapshot accounts (read-only,
+        # synthetic negative ids) so the existing PortfolioPage UI sees
+        # them like any other account. Off behind a config flag so a
+        # dependency / data issue here can't degrade the manual-account
+        # snapshot which is the primary workflow.
+        if account_id is None and getattr(
+            get_config(), "portfolio_include_broker_snapshots", False,
+        ):
+            broker_extras = self._build_broker_snapshot_accounts(
+                aggregate=aggregate,
+                aggregate_currency=aggregate_currency,
+                as_of_date=as_of_date,
+                cost_method=method,
+            )
+            accounts_payload.extend(broker_extras)
+
         return {
             "as_of": as_of_date.isoformat(),
             "cost_method": method,
             "currency": aggregate_currency,
-            "account_count": len(account_rows),
+            "account_count": len(accounts_payload),
             "total_cash": round(aggregate["total_cash"], 6),
             "total_market_value": round(aggregate["total_market_value"], 6),
             "total_equity": round(aggregate["total_equity"], 6),
@@ -572,6 +588,86 @@ class PortfolioService:
             "fx_stale": aggregate["fx_stale"],
             "accounts": accounts_payload,
         }
+
+    def _build_broker_snapshot_accounts(
+        self,
+        *,
+        aggregate: Dict[str, Any],
+        aggregate_currency: str,
+        as_of_date: date,
+        cost_method: str,
+    ) -> List[Dict[str, Any]]:
+        """Pull the latest Firstrade snapshot, translate it via the
+        adapter, and fold the FX-converted totals into ``aggregate``.
+
+        Failures here are non-fatal: if the broker repo / adapter
+        raises (missing tables on first boot, vendor-shape drift, …)
+        we log and return an empty list so the manual-account
+        snapshot still goes out.
+        """
+        try:
+            from src.repositories.broker_snapshot_repo import (
+                BrokerSnapshotRepository,
+            )
+            from src.services.broker_to_portfolio_adapter import (
+                broker_snapshot_to_portfolio_accounts,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive boot path
+            logger.info(
+                "[portfolio_service] broker snapshot bridge import failed; "
+                "skipping (%s)", exc,
+            )
+            return []
+
+        try:
+            broker_snapshot = BrokerSnapshotRepository().get_latest_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[portfolio_service] broker snapshot read failed; skipping (%s)",
+                exc,
+            )
+            return []
+
+        adapted = broker_snapshot_to_portfolio_accounts(
+            broker_snapshot, base_currency="USD", cost_method=cost_method,
+        )
+        if not adapted:
+            return []
+
+        for snapshot_account in adapted:
+            base_currency = snapshot_account.get("base_currency") or "USD"
+            cash_cny, stale_cash, _ = self._convert_amount(
+                amount=snapshot_account["total_cash"],
+                from_currency=base_currency,
+                to_currency=aggregate_currency,
+                as_of_date=as_of_date,
+            )
+            mv_cny, stale_mv, _ = self._convert_amount(
+                amount=snapshot_account["total_market_value"],
+                from_currency=base_currency,
+                to_currency=aggregate_currency,
+                as_of_date=as_of_date,
+            )
+            eq_cny, stale_eq, _ = self._convert_amount(
+                amount=snapshot_account["total_equity"],
+                from_currency=base_currency,
+                to_currency=aggregate_currency,
+                as_of_date=as_of_date,
+            )
+            unrealized_cny, stale_unrealized, _ = self._convert_amount(
+                amount=snapshot_account["unrealized_pnl"],
+                from_currency=base_currency,
+                to_currency=aggregate_currency,
+                as_of_date=as_of_date,
+            )
+            aggregate["total_cash"] += cash_cny
+            aggregate["total_market_value"] += mv_cny
+            aggregate["total_equity"] += eq_cny
+            aggregate["unrealized_pnl"] += unrealized_cny
+            aggregate["fx_stale"] = aggregate["fx_stale"] or any([
+                stale_cash, stale_mv, stale_eq, stale_unrealized,
+            ])
+        return adapted
 
     def refresh_fx_rates(
         self,

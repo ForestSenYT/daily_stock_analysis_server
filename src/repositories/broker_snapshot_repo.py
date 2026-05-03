@@ -344,7 +344,16 @@ class BrokerSnapshotRepository:
         broker: str = DEFAULT_BROKER,
         account_hash: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return at most one row per ``account_hash`` (the freshest)."""
+        """Return at most one row per ``account_hash`` (the freshest)
+        from the **most recent sync only** (5-minute fence).
+
+        Without the time-window filter, leftover rows from earlier
+        buggy syncs (e.g. the "5 sub-accounts" regression we hit while
+        debugging the all_accounts shape) would surface as live
+        accounts and inflate the count. The fence anchors on the
+        freshest ``as_of`` so a fresh sync's rows always win, but
+        anything older than 5 minutes from that timestamp is excluded.
+        """
         with self.db.get_session() as session:
             stmt = (
                 select(BrokerSnapshot)
@@ -359,8 +368,14 @@ class BrokerSnapshotRepository:
             if account_hash:
                 stmt = stmt.where(BrokerSnapshot.account_hash == account_hash)
             rows = session.execute(stmt).scalars().all()
+        if not rows:
+            return []
+        latest_ts = rows[0].as_of
+        cutoff = latest_ts - _five_minutes()
         seen: Dict[str, Dict[str, Any]] = {}
         for row in rows:
+            if row.as_of < cutoff:
+                break
             key = row.account_hash or ""
             if key in seen:
                 continue

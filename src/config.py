@@ -862,6 +862,13 @@ class Config:
     # 跨部署可关联的弱哈希盐。
     broker_account_hash_salt: str = ""
 
+    # 把 Firstrade 实时快照桥接进 PortfolioPage 的「持仓管理」视图。
+    # 开启后 ``/api/v1/portfolio/snapshot`` 会在原有手动账户后追加一个
+    # 合成的 broker 账户（id 为负数，永不与真实 account_id 冲突），
+    # 让所有现成的图表 / 风险面板 / 配置图自动展示券商持仓。
+    # 关闭则 PortfolioPage 行为完全与之前一致。
+    portfolio_include_broker_snapshots: bool = True
+
     # === 输入校验加固（防 LLM 幻觉） ===
     # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
     # 都查不到数据时，是否短路——直接拒绝继续分析，避免 LLM 凭训练
@@ -1582,6 +1589,9 @@ class Config:
                 os.getenv('BROKER_FIRSTRADE_MERGE_SUB_ACCOUNTS'), True,
             ),
             broker_account_hash_salt=(os.getenv('BROKER_ACCOUNT_HASH_SALT') or '').strip(),
+            portfolio_include_broker_snapshots=parse_env_bool(
+                os.getenv('PORTFOLIO_INCLUDE_BROKER_SNAPSHOTS'), True,
+            ),
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
