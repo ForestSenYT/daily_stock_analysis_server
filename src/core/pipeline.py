@@ -1064,6 +1064,42 @@ class StockAnalysisPipeline:
                 report_language,
             )
             result.analysis_summary = dash.get("analysis_summary", "")
+            # ---- Prose fields (走势 / 技术 / 基本面 / 情绪 / 综合) ----
+            # The system prompt asks the LLM to fill every one of these,
+            # but a previous version of this converter only pulled
+            # ``analysis_summary`` and let the rest fall back to the
+            # dataclass's ``""`` defaults — so even when the model wrote
+            # them, ``trend_analysis`` / ``technical_analysis`` /
+            # ``buy_reason`` / etc. surfaced empty in the API response.
+            # We now fan-out the dict so every prose slot the LLM filled
+            # actually reaches the response.
+            for prose_field in (
+                "trend_analysis",
+                "short_term_outlook",
+                "medium_term_outlook",
+                "technical_analysis",
+                "ma_analysis",
+                "volume_analysis",
+                "pattern_analysis",
+                "fundamental_analysis",
+                "sector_position",
+                "company_highlights",
+                "news_summary",
+                "market_sentiment",
+                "hot_topics",
+                "key_points",
+                "risk_warning",
+                "buy_reason",
+            ):
+                value = dash.get(prose_field)
+                # Accept str (the schema's intent) and list (LLMs sometimes
+                # emit ``key_points`` as a list — join with 顿号/comma so
+                # the dataclass field stays str-typed).
+                if isinstance(value, list):
+                    sep = ", " if report_language == "en" else "、"
+                    value = sep.join(str(v).strip() for v in value if str(v).strip())
+                if value:
+                    setattr(result, prose_field, str(value))
             # The AI returns a top-level dict that contains a nested 'dashboard' sub-key
             # with core_conclusion / battle_plan / intelligence.  AnalysisResult's helper
             # methods (get_sniper_points, get_core_conclusion, etc.) expect that inner
