@@ -653,6 +653,22 @@ class AgentExecutor:
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
             if context.get("news_context"):
                 parts.append(f"\n[系统已获取的新闻与舆情情报]\n{context['news_context']}")
+            # Quant factor snapshot — pre-computed by the pipeline from
+            # the same OHLCV history we already loaded for trend
+            # analysis. Each factor row carries an ``expected_direction``
+            # ("positive" / "negative" / "unknown") indicating which way
+            # the factor predicts forward returns; the LLM should weave
+            # bullish / bearish takeaways into ``analysis_summary`` and
+            # use them as supporting evidence for ``operation_advice``.
+            if context.get("quant_signals"):
+                if report_language == "en":
+                    label = "[Quant factor snapshot — `expected_direction` indicates the factor's predictive sign for forward returns]"
+                else:
+                    label = "[系统已获取的量化因子快照 — `expected_direction` 表示该因子对未来收益的预期方向，可据此佐证多空判断]"
+                parts.append(
+                    f"\n{label}\n"
+                    f"{json.dumps(context['quant_signals'], ensure_ascii=False)}"
+                )
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)

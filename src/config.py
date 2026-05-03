@@ -869,6 +869,12 @@ class Config:
     # 关闭则 PortfolioPage 行为完全与之前一致。
     portfolio_include_broker_snapshots: bool = True
 
+    # PortfolioPage 顶部的 ``总权益 / 总市值 / 总现金``聚合用什么币种展示。
+    # 默认 USD —— 适合 Firstrade（美股）用户；想做 CN 视图就改成 ``CNY``。
+    # 影响 ``/api/v1/portfolio/snapshot`` 返回的 ``currency`` 字段以及内部
+    # FX 转换的目标币种（每个账户的 base_currency 不变，仍各自独立）。
+    portfolio_aggregate_currency: str = "USD"
+
     # === 输入校验加固（防 LLM 幻觉） ===
     # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
     # 都查不到数据时，是否短路——直接拒绝继续分析，避免 LLM 凭训练
@@ -1592,6 +1598,9 @@ class Config:
             portfolio_include_broker_snapshots=parse_env_bool(
                 os.getenv('PORTFOLIO_INCLUDE_BROKER_SNAPSHOTS'), True,
             ),
+            portfolio_aggregate_currency=(
+                os.getenv('PORTFOLIO_AGGREGATE_CURRENCY') or 'USD'
+            ).strip().upper() or 'USD',
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),

@@ -459,7 +459,10 @@ class PortfolioService:
             account_rows = self.repo.list_accounts(include_inactive=False)
 
         accounts_payload: List[Dict[str, Any]] = []
-        aggregate_currency = "CNY"
+        aggregate_currency = (
+            getattr(get_config(), "portfolio_aggregate_currency", None)
+            or "USD"
+        ).upper()
         aggregate = {
             "total_cash": 0.0,
             "total_market_value": 0.0,

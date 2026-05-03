@@ -344,6 +344,7 @@ class StockAnalysisPipeline:
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
             historical_bars: Optional[List[Any]] = None  # hoisted for guard below
+            quant_signals: Optional[Dict[str, Any]] = None  # hoisted for agent injection
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
@@ -359,6 +360,24 @@ class StockAnalysisPipeline:
                     trend_result = self.trend_analyzer.analyze(df, code)
                     logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
+                    # Compute quant factor snapshot from the same df we
+                    # already built — zero extra DB hit. Best-effort:
+                    # any failure here must not block analysis, so the
+                    # service returns None on bad inputs / disabled flag.
+                    try:
+                        from src.services.quant_signals_service import (
+                            compute_quant_signals,
+                        )
+                        quant_signals = compute_quant_signals(df, config=self.config)
+                        if quant_signals:
+                            logger.info(
+                                f"{stock_name}({code}) 量化因子快照: "
+                                f"{len(quant_signals.get('factors') or [])} 个因子已计算"
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(
+                            f"{stock_name}({code}) 量化因子快照计算失败 (跳过): {e}"
+                        )
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
@@ -876,6 +895,8 @@ class StockAnalysisPipeline:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
             if trend_result:
                 initial_context["trend_result"] = self._safe_to_dict(trend_result)
+            if quant_signals:
+                initial_context["quant_signals"] = quant_signals
 
             # Agent path: inject social sentiment as news_context so both
             # executor (_build_user_message) and orchestrator (ctx.set_data)
