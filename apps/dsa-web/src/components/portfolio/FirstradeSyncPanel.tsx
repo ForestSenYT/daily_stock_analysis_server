@@ -50,7 +50,6 @@ type PanelMode =
   | 'syncing';
 
 const STALE_THRESHOLD_SECONDS = 3600; // 1h, matches agent tool default
-const MAX_PREVIEW_POSITIONS = 10;
 
 function formatNumber(value: number | null | undefined, digits = 2): string {
   if (value == null || Number.isNaN(value)) return '--';
