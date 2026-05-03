@@ -292,7 +292,9 @@ class FirstradeReadOnlyClient:
             return BrokerLoginResult(
                 status="ok",
                 broker=self.BROKER_NAME,
-                account_count=self._safe_len(getattr(account_data, "all_accounts", None)),
+                account_count=len(
+                    getattr(account_data, "account_numbers", None) or []
+                ),
             )
 
     def verify_mfa(self, code: str) -> BrokerLoginResult:
@@ -341,8 +343,8 @@ class FirstradeReadOnlyClient:
             return BrokerLoginResult(
                 status="ok",
                 broker=self.BROKER_NAME,
-                account_count=self._safe_len(
-                    getattr(self._sdk.account_data, "all_accounts", None)
+                account_count=len(
+                    getattr(self._sdk.account_data, "account_numbers", None) or []
                 ),
             )
 
@@ -354,50 +356,39 @@ class FirstradeReadOnlyClient:
     # ----------------------- read paths --------------------------
 
     def list_accounts(self) -> List[BrokerAccount]:
+        """Enumerate the user's real Firstrade accounts.
+
+        ``firstrade==0.0.38`` exposes the canonical list as
+        ``account_data.account_numbers`` — a list of bare account-number
+        strings. We DO NOT iterate ``account_data.all_accounts`` (which
+        is the raw HTTP response wrapper containing ``statusCode`` etc.,
+        NOT a per-account list — earlier diagnostic logs confirmed this).
+        """
         sdk = self._require_logged_in()
         if sdk is None:
             return []
-        accounts: List[BrokerAccount] = []
         try:
-            raw_attr = getattr(sdk.account_data, "all_accounts", None)
-            raw_accounts = self._normalize_accounts_iterable(raw_attr)
-            # Optional collapse: when the vendor returned a dict with N
-            # sub-account "views" (cash / margin / IRA / Roth / options
-            # etc.) we present them as a SINGLE primary account in the
-            # UI/Agent surface. The flag is on by default — flip it off
-            # via ``BROKER_FIRSTRADE_MERGE_SUB_ACCOUNTS=false`` if you
-            # genuinely hold multiple independent accounts.
-            should_merge = bool(
-                getattr(self._config, "broker_firstrade_merge_sub_accounts", True)
+            account_numbers = list(
+                getattr(sdk.account_data, "account_numbers", None) or []
             )
-            pre_merge_len = len(raw_accounts)
-            if (
-                should_merge
-                and isinstance(raw_attr, dict)
-                and pre_merge_len > 1
-            ):
-                # Keep the first dict entry as the canonical primary;
-                # the other sub-accounts will dispatch to this one when
-                # vendor doesn't tag rows per-account.
-                raw_accounts = raw_accounts[:1]
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[firstrade] list_accounts iteration failed: %s",
+                "[firstrade] list_accounts: account_numbers read failed: %s",
                 _sanitize_exception(exc),
             )
             return []
+        # Per-row "real account" already carries the masking we need;
+        # log only the *count*, not the values.
         logger.info(
-            "[firstrade] list_accounts: vendor returned attr_type=%s, "
-            "iterable_len=%d, after_merge=%d, item_types=%s",
-            type(raw_attr).__name__,
-            pre_merge_len,
-            len(raw_accounts),
-            [type(r).__name__ for r in raw_accounts[:5]],
+            "[firstrade] list_accounts: account_numbers count=%d "
+            "(via account_data.account_numbers, the canonical anchor)",
+            len(account_numbers),
         )
         salt = self._salt()
+        accounts: List[BrokerAccount] = []
         skipped = 0
-        for raw in raw_accounts:
-            real_account = self._extract_real_account_number(raw)
+        for raw in account_numbers:
+            real_account = str(raw or "").strip()
             if not real_account:
                 skipped += 1
                 continue
@@ -411,51 +402,128 @@ class FirstradeReadOnlyClient:
                     account_last4=last4,
                     account_alias=alias,
                     as_of=_now_iso(),
-                    raw_payload=_as_dict(raw),
+                    raw_payload={},  # account_numbers is just a string list, no payload
                 )
             )
-        if skipped or not accounts:
-            # Log row-shape diagnostics WITHOUT leaking the account
-            # numbers themselves: only the type + key list. This makes
-            # SDK-shape drift debuggable from logs alone.
-            shapes = []
-            for raw in raw_accounts[:5]:  # cap so log line stays small
-                if isinstance(raw, dict):
-                    shapes.append("dict(keys=%s)" % sorted(raw.keys())[:8])
-                else:
-                    shapes.append(type(raw).__name__)
+        if skipped:
             logger.warning(
-                "[firstrade] list_accounts: total=%d, extracted=%d, skipped=%d. "
-                "Vendor row shape sample (first 5): %s",
-                len(raw_accounts), len(accounts), skipped, shapes,
+                "[firstrade] list_accounts: %d empty entries skipped",
+                skipped,
             )
         return accounts
 
     def get_balances(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerBalance]:
-        return self._iter_per_account(
-            account_hash_or_alias,
-            self._fetch_balance_for,
-        )
+        """Read per-account balances.
+
+        ``firstrade==0.0.38`` exposes balances in two places:
+          * ``account_data.account_balances`` — populated lazily after
+            ``get_account_balances(account=X)`` is called.
+          * ``account_data.get_balance_overview()`` — instant
+            cross-account view (single dict).
+        We call the per-account method to ensure the dict is populated,
+        then read it back keyed by the masked account_hash. The method
+        itself returns the same float we'd get from ``account_balances``,
+        so we don't need its return value.
+        """
+        sdk = self._require_logged_in()
+        if sdk is None:
+            return []
+        ad = sdk.account_data
+        balances: List[BrokerBalance] = []
+        for real, account_hash, last4, alias in self._resolve_target_accounts(
+            account_hash_or_alias
+        ):
+            # Trigger SDK to populate / refresh self.account_balances[real].
+            self._invoke_side_effect(
+                ad,
+                method_name="get_account_balances",
+                account=real,
+                phase_label="balances",
+            )
+            balance_payload = self._read_account_balance_detail(ad, real)
+            balances.append(self._payload_to_balance(
+                balance_payload, account_hash, last4, alias,
+            ))
+        return balances
 
     def get_positions(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerPosition]:
-        return self._fetch_once_and_dispatch(
-            method_names=("get_positions", "positions"),
-            account_hash_or_alias=account_hash_or_alias,
-            row_to_dto=self._raw_to_position,
-        )
+        """Read per-account positions.
+
+        Vendor design: ``get_positions(account=X)`` triggers an HTTP
+        call and writes the detailed position dicts into
+        ``account_data.securities_held`` (a dict keyed by symbol, value
+        is the per-symbol detail dict). The method itself only returns
+        the **list of ticker strings** — useless without reading the
+        side-effect dict. This is the bug that caused the earlier
+        UI-shows-all-dashes regression.
+        """
+        sdk = self._require_logged_in()
+        if sdk is None:
+            return []
+        ad = sdk.account_data
+        positions: List[BrokerPosition] = []
+        for real, account_hash, last4, alias in self._resolve_target_accounts(
+            account_hash_or_alias
+        ):
+            ticker_list = self._invoke_side_effect(
+                ad,
+                method_name="get_positions",
+                account=real,
+                phase_label="positions",
+            )
+            details_map = self._read_securities_held(ad, real)
+            # Decide which symbol list to iterate. Prefer the SDK's
+            # return value (canonical "current holdings"); fall back
+            # to ``securities_held`` keys if the SDK returned None.
+            symbols: List[str]
+            if isinstance(ticker_list, (list, tuple)) and ticker_list:
+                symbols = [str(s).strip() for s in ticker_list if s]
+            elif isinstance(details_map, dict):
+                symbols = [str(s).strip() for s in details_map.keys() if s]
+            else:
+                symbols = []
+            for symbol in symbols:
+                detail = (
+                    details_map.get(symbol)
+                    if isinstance(details_map, dict) else {}
+                )
+                if not isinstance(detail, dict):
+                    detail = {}
+                positions.append(self._payload_to_position(
+                    symbol, detail, account_hash, last4, alias,
+                ))
+        return positions
 
     def get_orders(
         self, account_hash_or_alias: Optional[str] = None,
     ) -> List[BrokerOrder]:
-        return self._fetch_once_and_dispatch(
-            method_names=("get_orders", "orders"),
-            account_hash_or_alias=account_hash_or_alias,
-            row_to_dto=self._raw_to_order,
-        )
+        """Read per-account orders. Same side-effect pattern as
+        positions: the method populates ``account_data.orders``
+        (dict / list) and returns a thin reference."""
+        sdk = self._require_logged_in()
+        if sdk is None:
+            return []
+        ad = sdk.account_data
+        orders: List[BrokerOrder] = []
+        for real, account_hash, last4, alias in self._resolve_target_accounts(
+            account_hash_or_alias
+        ):
+            order_ref = self._invoke_side_effect(
+                ad,
+                method_name="get_orders",
+                account=real,
+                phase_label="orders",
+            )
+            order_rows = self._read_orders(ad, real, order_ref)
+            for raw in order_rows:
+                orders.append(self._payload_to_order(
+                    raw, account_hash, last4, alias,
+                ))
+        return orders
 
     def get_transactions(
         self,
@@ -471,19 +539,32 @@ class FirstradeReadOnlyClient:
             )
             normalized = "today"
         if normalized == "cust":
-            # Phase-1: schema reserves "cust" but we don't ship the
-            # custom-range fetch yet — silently downgrade.
             logger.info(
                 "[firstrade] custom date range not implemented in v1; "
                 "returning today's history."
             )
             normalized = "today"
-        return self._fetch_once_and_dispatch(
-            method_names=("get_history", "get_transactions", "transactions"),
-            account_hash_or_alias=account_hash_or_alias,
-            row_to_dto=self._raw_to_transaction,
-            extra_args=(normalized,),
-        )
+        sdk = self._require_logged_in()
+        if sdk is None:
+            return []
+        ad = sdk.account_data
+        results: List[BrokerTransaction] = []
+        for real, account_hash, last4, alias in self._resolve_target_accounts(
+            account_hash_or_alias
+        ):
+            history_ref = self._invoke_side_effect(
+                ad,
+                method_name="get_account_history",
+                account=real,
+                phase_label="history",
+                extra_kwargs={"period": normalized},
+            )
+            tx_rows = self._read_history(ad, real, history_ref)
+            for raw in tx_rows:
+                results.append(self._payload_to_transaction(
+                    raw, account_hash, last4, alias,
+                ))
+        return results
 
     # ------------------------------------------------------------------
     # Internals
@@ -691,382 +772,313 @@ class FirstradeReadOnlyClient:
                 targets.append((real_account, account_hash, last4, alias))
         return targets
 
-    def _iter_per_account(
-        self,
-        account_hash_or_alias: Optional[str],
-        fetcher,
-        flat: bool = False,
-    ):
-        results: List[Any] = []
-        sdk = self._require_logged_in()
-        if sdk is None:
-            return results
-        for real, ah, last4, alias in self._resolve_target_accounts(account_hash_or_alias):
-            try:
-                fetched = fetcher(real, ah, last4, alias)
-            except Exception as exc:  # noqa: BLE001 — boundary
-                logger.warning(
-                    "[firstrade] fetch on %s failed: %s",
-                    ah,  # never log alias / real number
-                    _sanitize_exception(exc),
-                )
-                continue
-            if fetched is None:
-                continue
-            if flat and isinstance(fetched, list):
-                results.extend(fetched)
-            else:
-                results.append(fetched)
-        return results
-
     # ------------------------------------------------------------------
     # Per-account fetch helpers — split out so the iteration logic
     # stays readable. Each one converts the vendor's per-call result
     # into our DTO list, redacting the raw payload on the way out.
     # ------------------------------------------------------------------
 
-    def _fetch_balance_for(
-        self, real: str, account_hash: str, last4: str, alias: str,
-    ) -> Optional[BrokerBalance]:
-        sdk = self._sdk
-        if sdk is None:
-            return None
-        # The vendor library exposes per-account balance under
-        # ``account_balance`` / ``balance``. Fall through gracefully if
-        # the attribute moves around between SDK versions.
-        for method in ("get_account_balance", "get_balance", "account_balance"):
-            fn = getattr(sdk.account_data, method, None)
-            if fn is None:
-                continue
-            try:
-                raw = fn(real) if callable(fn) else fn
-            except TypeError:
-                # Some attributes are dicts, not callables.
-                raw = fn  # type: ignore[assignment]
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(_sanitize_exception(exc)) from None
-            return BrokerBalance(
-                broker=self.BROKER_NAME,
-                account_hash=account_hash,
-                account_last4=last4,
-                account_alias=alias,
-                cash=_to_float(_first_present(raw, "cash", "Cash", "available_cash")),
-                buying_power=_to_float(_first_present(raw, "buying_power", "BuyingPower")),
-                total_value=_to_float(_first_present(raw, "total_value", "TotalValue", "equity")),
-                currency=_first_present(raw, "currency", "Currency") or "USD",
-                as_of=_now_iso(),
-                raw_payload=_as_dict(raw),
-            )
-        return None
+    # =================================================================
+    # NEW pipeline — side-effect-aware fetchers (firstrade==0.0.38)
+    # =================================================================
+    #
+    # The MaxxRK/firstrade-api library doesn't return detail dicts from
+    # its read methods — instead it WRITES the details onto attributes
+    # of the FTAccountData instance:
+    #
+    #   data.get_positions(account=X)       → returns ticker[],
+    #                                         writes data.securities_held
+    #   data.get_account_balances(account=X) → writes data.account_balances
+    #   data.get_orders(account=X)          → writes data.orders / data.order_history
+    #   data.get_account_history(account=X) → writes data.account_history
+    #
+    # Calling these methods to "fetch" without then reading the
+    # side-effect attribute is the classic bug — that's exactly what
+    # made the UI show all dashes earlier. The helpers below enforce
+    # the right pattern.
 
-    # -----------------------------------------------------------------
-    # NEW pipeline (vendor-call-once + per-row dispatch)
-    # -----------------------------------------------------------------
-    #
-    # The Firstrade SDK ignores the ``real_account_number`` argument
-    # passed to ``get_positions`` / ``get_orders`` — it returns the
-    # full set of positions regardless. Iterating per sub-account
-    # (the original design) duplicated every row N times where N =
-    # number of sub-accounts. The new flow:
-    #
-    #   1. Resolve the user-requested filter (or all sub-accounts).
-    #   2. Pick a *primary* sub-account to drive the single vendor
-    #      call (the vendor still wants A account-number argument).
-    #   3. Iterate rows once. For each row, look at any vendor-side
-    #      account-id field (``account`` / ``account_id`` / etc.) —
-    #      if present and matching one of OUR sub-account hashes,
-    #      assign the row to that sub-account; otherwise fall back
-    #      to the primary.
-    #
-    # This survives both: (a) SDKs that DO tag rows per account
-    # (correctly distributed), (b) SDKs that don't (everything goes
-    # under primary, no duplication).
-
-    def _fetch_once_and_dispatch(
+    def _invoke_side_effect(
         self,
+        account_data: Any,
         *,
-        method_names,
-        account_hash_or_alias: Optional[str],
-        row_to_dto,
-        extra_args: Tuple = (),
-    ) -> List[Any]:
-        sdk = self._require_logged_in()
-        if sdk is None:
-            return []
-        # All known sub-accounts (may be one) — needed both for the
-        # per-row dispatch table and for filtering by user input.
-        all_subs = self._resolve_target_accounts(None)
-        if not all_subs:
-            return []
-        # Apply the user's filter AFTER we know the full list, so the
-        # dispatch table still covers every sub-account that vendor
-        # might tag a row with.
-        wanted = (account_hash_or_alias or "").strip().lower() or None
-        primary_real, primary_hash, primary_last4, primary_alias = all_subs[0]
-        # Reverse map: real_account_number → (hash, last4, alias).
-        real_to_meta = {
-            real: (ah, l4, al)
-            for real, ah, l4, al in all_subs
-        }
+        method_name: str,
+        account: str,
+        phase_label: str,
+        extra_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Invoke a vendor read method and return whatever it returned.
 
-        # Single vendor call with the primary account.
-        raw_iter: Iterable[Any] = []
-        for method in method_names:
-            fn = getattr(sdk.account_data, method, None)
-            if fn is None:
-                continue
-            try:
-                raw_iter = self._invoke_vendor_method(
-                    fn, primary_real, *extra_args,
-                )
-            except _VendorCallFailed as exc:
-                raise RuntimeError(str(exc)) from None
-            break
-        rows = list(raw_iter or [])
-
-        # One log line per call so you can see this in production logs:
-        # how many rows we got, whether vendor tagged them with
-        # account ids, what types they look like.
-        tagged_count = 0
-        for raw in rows[:5]:  # only sample for the log line
-            row_account = self._extract_row_account_id(raw)
-            if row_account:
-                tagged_count += 1
-        logger.info(
-            "[firstrade] vendor returned %d rows from %s; "
-            "%d/%d sample rows are tagged with an account id",
-            len(rows), method_names[0], tagged_count, min(5, len(rows)),
-        )
-        # Also dump the first row's *shape* (keys / attrs, NO values)
-        # so we can map vendor field names without guessing. Sensitive
-        # keys are filtered before logging — see _safe_keys filter.
-        if rows:
-            self._log_row_shape(method_names[0], rows[0])
-            # If the row is a bare string (a ticker symbol), the
-            # detailed position object lives in some other attribute
-            # on ``account_data`` (e.g. ``data.positions[ticker]``).
-            # Dump every attribute on the account_data instance so we
-            # can find the right detail source on the next round.
-            if isinstance(rows[0], str):
-                self._log_account_data_attrs(sdk.account_data, rows[0])
-
-        results: List[Any] = []
-        for raw in rows:
-            row_account = self._extract_row_account_id(raw)
-            if row_account and row_account in real_to_meta:
-                ah, l4, al = real_to_meta[row_account]
-            else:
-                # Vendor didn't tag the row — fall back to primary.
-                ah, l4, al = primary_hash, primary_last4, primary_alias
-            # Apply user filter AFTER dispatch so users can
-            # request ``account_alias`` and still get the right rows.
-            if wanted is not None and wanted not in {
-                ah.lower(), l4.lower(), al.lower(),
-            }:
-                continue
-            try:
-                dto = row_to_dto(raw, ah, l4, al)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[firstrade] row → DTO conversion failed: %s",
-                    _sanitize_exception(exc),
-                )
-                continue
-            if dto is not None:
-                results.append(dto)
-        return results
-
-    @staticmethod
-    def _invoke_vendor_method(fn, real, *extra):
-        """Call vendor ``fn(real, *extra)`` with graceful fallbacks for
-        signatures that take fewer args, that return non-iterables,
-        or that are bare attributes (not callables)."""
-        if not callable(fn):
-            return fn or []
-        for args in ((real, *extra), (real,), ()):
-            try:
-                return fn(*args)
-            except TypeError:
-                continue
-            except Exception as exc:  # noqa: BLE001
-                raise _VendorCallFailed(_sanitize_exception(exc)) from None
-        # Every signature attempt raised TypeError — surface that.
-        raise _VendorCallFailed(
-            "vendor method signature did not match any of (real, *extra) / (real,) / ()"
-        )
-
-    @staticmethod
-    def _log_account_data_attrs(account_data: Any, sample_ticker: str) -> None:
-        """Dump every public attribute on ``FTAccountData`` so we can
-        find where vendor stores the position / order / balance
-        details. Called when ``get_positions`` returns bare strings
-        (i.e. tickers) instead of objects — meaning details live
-        elsewhere on the account_data instance.
-
-        Logs SHAPE only (type + keys + sample-key) — never the
-        underlying values, so it's safe even if those dicts contain
-        prices / dollar amounts.
+        We try ``fn(account=X, **extra_kwargs)`` first — that's the
+        canonical signature in 0.0.38. If the SDK signature differs we
+        fall back to positional. Any exception is sanitised and logged
+        with the masked account; the call is treated as best-effort
+        (returns None) so a single broken endpoint doesn't poison
+        every other read.
         """
+        fn = getattr(account_data, method_name, None)
+        if fn is None or not callable(fn):
+            logger.info(
+                "[firstrade] %s: vendor SDK has no callable %r; skipping",
+                phase_label, method_name,
+            )
+            return None
+        kwargs = dict(extra_kwargs or {})
+        kwargs["account"] = account
+        last_4 = mask_account_number(account)[0]
         try:
-            public = sorted(k for k in dir(account_data) if not k.startswith("_"))
-        except Exception:
-            return
-        # First, the high-level attribute list so we can spot the
-        # right detail dict.
-        logger.info(
-            "[firstrade] account_data public attrs: %s",
-            public[:60],
-        )
-        # Then, for each attribute that looks like a dict / list, dump
-        # its shape — this is the most useful signal (the one that
-        # has ``sample_ticker`` as a key is almost certainly the
-        # detail source).
-        for attr_name in public:
+            ret = fn(**kwargs)
+        except TypeError as exc:
+            # Signature drift — try positional.
+            logger.debug(
+                "[firstrade] %s: kwarg call hit TypeError (%s); "
+                "retrying positional",
+                phase_label, _sanitize_exception(exc),
+            )
             try:
-                attr = getattr(account_data, attr_name, None)
-            except Exception:
-                continue
-            if attr is None or callable(attr):
+                ret = fn(account, *list((extra_kwargs or {}).values()))
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning(
+                    "[firstrade] %s: vendor call %s(****%s, ...) failed: %s",
+                    phase_label, method_name, last_4,
+                    _sanitize_exception(exc2),
+                )
+                return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[firstrade] %s: vendor call %s(account=****%s) failed: %s",
+                phase_label, method_name, last_4, _sanitize_exception(exc),
+            )
+            return None
+        # One-shot diagnostic dump after the side-effect — lets us see
+        # exactly which dynamic attribute holds the details on this SDK
+        # version. We rate-limit via class-level set so logs don't spam.
+        self._log_post_call_attrs(account_data, phase_label, account, ret)
+        return ret
+
+    @staticmethod
+    def _read_securities_held(account_data: Any, account: str) -> Dict[str, Any]:
+        """Return the per-symbol detail map populated by
+        ``get_positions(account=X)``. Tolerates two known shapes:
+          1. ``securities_held = {symbol: detail_dict, ...}`` (current 0.0.38)
+          2. ``securities_held = {account_number: {symbol: detail}}``
+             (older variants)
+        """
+        candidate = getattr(account_data, "securities_held", None)
+        if not isinstance(candidate, dict):
+            return {}
+        # Shape 2: keys look like account numbers (string of digits)
+        # AND values are themselves dicts → drill into the matching key.
+        if account in candidate and isinstance(candidate[account], dict):
+            inner = candidate[account]
+            # Inner is {symbol: detail}
+            return {str(k): v for k, v in inner.items()}
+        # Shape 1: keys are symbols.
+        return {str(k): v for k, v in candidate.items()}
+
+    @staticmethod
+    def _read_account_balance_detail(
+        account_data: Any, account: str,
+    ) -> Dict[str, Any]:
+        """Return the balance detail dict for ``account``.
+
+        ``account_balances`` shapes we've seen:
+          1. ``{account_number: <float>}`` (single number — total value only)
+          2. ``{account_number: {field: value, ...}}`` (full detail dict)
+        We always return a dict so the mapper can use ``_first_present``
+        uniformly. For shape 1 we wrap the float as
+        ``{"total_value": <float>}``.
+        """
+        candidate = getattr(account_data, "account_balances", None)
+        if not isinstance(candidate, dict):
+            return {}
+        per_acct = candidate.get(account)
+        if isinstance(per_acct, dict):
+            return per_acct
+        if isinstance(per_acct, (int, float)):
+            return {"total_value": float(per_acct)}
+        return {}
+
+    @staticmethod
+    def _read_orders(
+        account_data: Any, account: str, fallback_ref: Any,
+    ) -> List[Any]:
+        """Return order rows for ``account``. Tries (in order):
+          1. ``account_data.orders[account]`` (dict-of-list shape)
+          2. ``account_data.orders`` (flat list)
+          3. ``account_data.order_history[account]``
+          4. ``fallback_ref`` itself if it's a list (some SDKs return rows)
+        """
+        for attr_name in ("orders", "order_history"):
+            attr = getattr(account_data, attr_name, None)
+            if isinstance(attr, dict):
+                inner = attr.get(account)
+                if isinstance(inner, list):
+                    return list(inner)
+                if isinstance(inner, dict):
+                    return list(inner.values())
+            if isinstance(attr, list):
+                return list(attr)
+        if isinstance(fallback_ref, list):
+            return list(fallback_ref)
+        if isinstance(fallback_ref, dict):
+            return list(fallback_ref.values())
+        return []
+
+    @staticmethod
+    def _read_history(
+        account_data: Any, account: str, fallback_ref: Any,
+    ) -> List[Any]:
+        """Same idea as ``_read_orders`` but for transaction history."""
+        for attr_name in ("account_history", "history", "transactions"):
+            attr = getattr(account_data, attr_name, None)
+            if isinstance(attr, dict):
+                inner = attr.get(account)
+                if isinstance(inner, list):
+                    return list(inner)
+                if isinstance(inner, dict):
+                    return list(inner.values())
+            if isinstance(attr, list):
+                return list(attr)
+        if isinstance(fallback_ref, list):
+            return list(fallback_ref)
+        if isinstance(fallback_ref, dict):
+            return list(fallback_ref.values())
+        return []
+
+    # Per-class one-shot logger to avoid spamming logs with the same
+    # diagnostic dump on every sync.
+    _LOGGED_POST_CALL: set = set()
+
+    @classmethod
+    def _log_post_call_attrs(
+        cls, account_data: Any, phase_label: str,
+        account: str, ret_value: Any,
+    ) -> None:
+        """One-time INFO log per (phase, sample-key-presence) showing
+        the shape of the dynamic attribute that should hold details
+        right after a side-effect method has been called.
+
+        Only the attribute *shape* is logged (key types / nested key
+        sample) — never raw values, never full account numbers."""
+        key = phase_label
+        if key in cls._LOGGED_POST_CALL:
+            return
+        cls._LOGGED_POST_CALL.add(key)
+        last_4 = mask_account_number(account)[0]
+        candidates = (
+            "securities_held", "positions",
+            "orders", "order_history",
+            "account_balances", "balance",
+            "account_history", "history", "transactions",
+        )
+        for attr_name in candidates:
+            attr = getattr(account_data, attr_name, None)
+            if attr is None:
                 continue
             if isinstance(attr, dict):
-                keys = list(attr.keys())
-                first_key = keys[0] if keys else None
+                first_key = next(iter(attr.keys()), None)
                 first_val = attr.get(first_key) if first_key is not None else None
-                # Whether ``sample_ticker`` is a key — strong hint
-                # that this is the detail dict for our position rows.
-                ticker_match = sample_ticker in keys
+                # Probe inner shape: if inner is dict, sample its keys.
+                inner_keys: List[str] = []
+                if isinstance(first_val, dict):
+                    inner_keys = sorted(str(k) for k in first_val.keys())[:20]
                 logger.info(
-                    "[firstrade] account_data.%s: dict, len=%d, "
-                    "sample_key=%r, sample_value_type=%s, "
-                    "ticker_in_keys=%s",
-                    attr_name,
-                    len(keys),
-                    str(first_key)[:40] if first_key is not None else None,
+                    "[firstrade] post-%s: %s = dict(len=%d, "
+                    "first_key_type=%s, first_value_type=%s, "
+                    "inner_keys_sample=%s)",
+                    phase_label, attr_name, len(attr),
+                    type(first_key).__name__,
                     type(first_val).__name__,
-                    ticker_match,
+                    inner_keys,
                 )
-            elif isinstance(attr, (list, tuple)):
+            elif isinstance(attr, list):
+                first_item = attr[0] if attr else None
+                inner_keys: List[str] = []
+                if isinstance(first_item, dict):
+                    inner_keys = sorted(str(k) for k in first_item.keys())[:20]
                 logger.info(
-                    "[firstrade] account_data.%s: %s, len=%d, "
-                    "first_item_type=%s",
-                    attr_name,
-                    type(attr).__name__,
-                    len(attr),
-                    type(attr[0]).__name__ if attr else None,
+                    "[firstrade] post-%s: %s = list(len=%d, "
+                    "first_item_type=%s, inner_keys=%s)",
+                    phase_label, attr_name, len(attr),
+                    type(first_item).__name__, inner_keys,
                 )
-
-    @staticmethod
-    def _log_row_shape(method_name: str, sample: Any) -> None:
-        """Dump the first vendor row's KEYS / ATTR NAMES (never values)
-        so we can see exactly what field names the SDK is using —
-        without that, ``_first_present`` is just guessing and the UI
-        ends up showing dashes everywhere.
-
-        Filters out anything that looks sensitive before logging."""
-        sensitive = {
-            "username", "password", "pin", "mfa_secret", "ftat",
-            "sid", "cookie", "cookies", "authorization", "account",
-            "account_number", "accountno", "accountnumber",
-            "token", "access_token", "secret",
-        }
-        sample_type = type(sample).__name__
-        dict_keys: List[str] = []
-        attr_keys: List[str] = []
-        if isinstance(sample, dict):
-            dict_keys = sorted(str(k) for k in sample.keys())
-        if hasattr(sample, "__dict__"):
-            try:
-                attr_keys = sorted(
-                    k for k in vars(sample).keys() if not k.startswith("_")
-                )
-            except TypeError:
-                attr_keys = []
-        # Public non-callable attrs (covers @property and slots).
-        try:
-            public_attrs = sorted(
-                k for k in dir(sample)
-                if not k.startswith("_")
-                and k.lower() not in sensitive
-            )
-        except Exception:  # pragma: no cover — defensive
-            public_attrs = []
-        safe_dict_keys = [k for k in dict_keys if k.lower() not in sensitive]
-        safe_attr_keys = [k for k in attr_keys if k.lower() not in sensitive]
+        # Also log the return value shape.
+        ret_keys: List[str] = []
+        if isinstance(ret_value, dict):
+            ret_keys = sorted(str(k) for k in ret_value.keys())[:20]
+        elif isinstance(ret_value, list) and ret_value and isinstance(ret_value[0], dict):
+            ret_keys = sorted(str(k) for k in ret_value[0].keys())[:20]
         logger.info(
-            "[firstrade] sample row shape from %s: type=%s, "
-            "dict_keys=%s, attr_keys=%s, public_attrs=%s",
-            method_name,
-            sample_type,
-            safe_dict_keys[:40],
-            safe_attr_keys[:40],
-            public_attrs[:40],
+            "[firstrade] post-%s: ret_type=%s, ret_keys=%s, account_last4=****%s",
+            phase_label, type(ret_value).__name__, ret_keys, last_4,
         )
 
-    @staticmethod
-    def _extract_row_account_id(raw: Any) -> str:
-        """Pull the vendor-side account id out of a raw position / order /
-        transaction row, BEFORE redaction strips it. Empty when absent."""
-        candidate = _first_present(
-            raw,
-            "account",
-            "account_number",
-            "accountNo",
-            "accountNumber",
-            "accountID",
-            "account_id",
-            "AcctNumber",
-            "acct_number",
+    # -----------------------------------------------------------------
+    # Payload → DTO mappers (used by the new pipeline). These read from
+    # vendor's already-populated detail dicts, so the field names below
+    # match what the SDK actually writes (verified via post-call logs).
+    # -----------------------------------------------------------------
+
+    def _payload_to_balance(
+        self, payload: Dict[str, Any],
+        account_hash: str, last4: str, alias: str,
+    ) -> BrokerBalance:
+        return BrokerBalance(
+            broker=self.BROKER_NAME,
+            account_hash=account_hash,
+            account_last4=last4,
+            account_alias=alias,
+            cash=_to_float(
+                _first_present(payload, "cash", "available_cash", "cash_balance")
+            ),
+            buying_power=_to_float(
+                _first_present(payload, "buying_power", "buyingPower", "available")
+            ),
+            total_value=_to_float(
+                _first_present(
+                    payload, "total_value", "equity", "account_value",
+                    "total_account_value", "net_account_value",
+                )
+            ),
+            currency=_first_present(payload, "currency") or "USD",
+            as_of=_now_iso(),
+            raw_payload=_as_dict(payload),
         )
-        if candidate is None:
-            return ""
-        return str(candidate).strip()
 
-    # -----------------------------------------------------------------
-    # row → DTO mappers (used by the new pipeline; redaction applied
-    # via ``_as_dict`` inside ``raw_payload``).
-    # -----------------------------------------------------------------
-
-    def _raw_to_position(
-        self, raw: Any, account_hash: str, last4: str, alias: str,
+    def _payload_to_position(
+        self,
+        symbol: str,
+        detail: Dict[str, Any],
+        account_hash: str,
+        last4: str,
+        alias: str,
     ) -> BrokerPosition:
-        # Day-change candidates — the vendor SDK has churned through
-        # several names; we try the common ones in order. If the
-        # vendor returns ``last_price`` + ``prev_close`` only (no
-        # pre-computed change), we derive day_change ourselves below.
+        # Same-day move — vendor field names probed in priority order;
+        # fall back to (last - prev_close) when nothing matches.
+        last_price = _to_float(
+            _first_present(
+                detail, "last_price", "lastPrice", "price", "current_price",
+                "currentPrice", "last", "mark",
+            )
+        )
+        prev_close = _to_float(
+            _first_present(
+                detail, "prev_close", "previousClose", "previous_close",
+                "prev_close_price",
+            )
+        )
         day_change = _to_float(
             _first_present(
-                raw,
-                "day_change",
-                "dayChange",
-                "DayChange",
-                "change",
-                "Change",
-                "change_amount",
-                "ChangeAmount",
-                "net_change",
+                detail, "day_change", "dayChange", "change", "change_amount",
+                "net_change", "change_dollar",
             )
         )
         day_change_pct = _to_float(
             _first_present(
-                raw,
-                "day_change_pct",
-                "dayChangePct",
-                "DayChangePercent",
-                "change_pct",
-                "ChangePercent",
-                "ChangePct",
-                "percent_change",
+                detail, "day_change_pct", "dayChangePct", "change_pct",
+                "change_percent", "percent_change",
             )
         )
-        last_price = _to_float(
-            _first_present(raw, "last_price", "LastPrice", "price")
-        )
-        prev_close = _to_float(
-            _first_present(
-                raw, "prev_close", "previousClose", "PreviousClose",
-            )
-        )
-        # Fallbacks: derive from last/prev when vendor didn't supply.
         if day_change is None and last_price is not None and prev_close:
             day_change = last_price - prev_close
         if (
@@ -1083,33 +1095,51 @@ class FirstradeReadOnlyClient:
             account_hash=account_hash,
             account_last4=last4,
             account_alias=alias,
-            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or ""),
+            symbol=str(
+                _first_present(detail, "symbol", "ticker") or symbol
+            ),
             quantity=_to_float(
-                _first_present(raw, "quantity", "Quantity", "qty", "shares")
+                _first_present(detail, "quantity", "qty", "shares", "amount")
             ),
             market_value=_to_float(
-                _first_present(raw, "market_value", "MarketValue", "value")
+                _first_present(
+                    detail, "market_value", "marketValue", "value",
+                    "current_market_value", "total_value",
+                )
             ),
             avg_cost=_to_float(
-                _first_present(raw, "avg_cost", "AvgCost", "average_cost")
+                _first_present(
+                    detail, "avg_cost", "average_cost", "averageCost",
+                    "cost_basis", "cost", "avg_price", "average_price",
+                )
             ),
             last_price=last_price,
             unrealized_pnl=_to_float(
-                _first_present(raw, "unrealized_pnl", "UnrealizedPnl", "pnl")
+                _first_present(
+                    detail, "unrealized_pnl", "unrealizedPnl",
+                    "unrealized_gain_loss", "pnl", "gain_loss",
+                )
             ),
             day_change=day_change,
             day_change_pct=day_change_pct,
-            currency=_first_present(raw, "currency", "Currency") or "USD",
+            currency=_first_present(detail, "currency") or "USD",
             as_of=_now_iso(),
-            raw_payload=_as_dict(raw),
+            raw_payload=_as_dict(detail),
         )
 
-    def _raw_to_order(
-        self, raw: Any, account_hash: str, last4: str, alias: str,
+    def _payload_to_order(
+        self,
+        raw: Any,
+        account_hash: str,
+        last4: str,
+        alias: str,
     ) -> BrokerOrder:
         salt = self._salt()
         raw_id = str(
-            _first_present(raw, "order_id", "orderId", "id", "OrderId") or ""
+            _first_present(
+                raw, "order_id", "orderId", "id", "OrderId", "orderno",
+                "order_no", "order_number",
+            ) or ""
         )
         return BrokerOrder(
             broker=self.BROKER_NAME,
@@ -1117,36 +1147,38 @@ class FirstradeReadOnlyClient:
             account_last4=last4,
             account_alias=alias,
             order_id_hash=hash_broker_id(raw_id, salt) if raw_id else "",
-            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
-            order_status=_first_present(raw, "status", "Status", "order_status"),
-            order_side=_first_present(raw, "side", "Side", "action"),
-            order_type=_first_present(raw, "order_type", "OrderType", "type"),
+            symbol=str(_first_present(raw, "symbol", "ticker") or "") or None,
+            order_status=_first_present(
+                raw, "order_status", "status", "state",
+            ),
+            order_side=_first_present(raw, "side", "action", "buy_sell"),
+            order_type=_first_present(raw, "order_type", "type"),
             order_quantity=_to_float(
-                _first_present(raw, "quantity", "Quantity", "qty")
+                _first_present(raw, "quantity", "qty", "shares", "order_quantity")
             ),
             filled_quantity=_to_float(
-                _first_present(raw, "filled", "Filled", "filled_quantity")
+                _first_present(raw, "filled", "filled_quantity", "executed")
             ),
             limit_price=_to_float(
-                _first_present(raw, "limit_price", "LimitPrice", "price")
+                _first_present(raw, "limit_price", "price", "limitPrice")
             ),
             as_of=_now_iso(),
             raw_payload=_as_dict(raw),
         )
 
-    def _raw_to_transaction(
-        self, raw: Any, account_hash: str, last4: str, alias: str,
+    def _payload_to_transaction(
+        self,
+        raw: Any,
+        account_hash: str,
+        last4: str,
+        alias: str,
     ) -> BrokerTransaction:
         salt = self._salt()
         raw_id = str(
             _first_present(
-                raw,
-                "transaction_id",
-                "transactionId",
-                "id",
-                "TransactionId",
-            )
-            or ""
+                raw, "transaction_id", "transactionId", "id", "TransactionId",
+                "history_id", "trade_id",
+            ) or ""
         )
         return BrokerTransaction(
             broker=self.BROKER_NAME,
@@ -1156,39 +1188,30 @@ class FirstradeReadOnlyClient:
             transaction_id_hash=(
                 hash_broker_id(raw_id, salt) if raw_id else ""
             ),
-            symbol=str(_first_present(raw, "symbol", "Symbol", "ticker") or "") or None,
+            symbol=str(_first_present(raw, "symbol", "ticker") or "") or None,
             transaction_type=_first_present(
-                raw, "type", "Type", "transaction_type", "action",
+                raw, "type", "transaction_type", "action", "activity",
             ),
             trade_date=str(
-                _first_present(raw, "trade_date", "TradeDate", "date") or ""
+                _first_present(raw, "trade_date", "date", "transaction_date") or ""
             ) or None,
             settle_date=str(
-                _first_present(raw, "settle_date", "SettleDate") or ""
+                _first_present(raw, "settle_date", "settlement_date") or ""
             ) or None,
             amount=_to_float(
-                _first_present(raw, "amount", "Amount", "net_amount")
+                _first_present(raw, "amount", "net_amount", "value")
             ),
             quantity=_to_float(
-                _first_present(raw, "quantity", "Quantity", "qty")
+                _first_present(raw, "quantity", "qty", "shares")
             ),
-            currency=_first_present(raw, "currency", "Currency") or "USD",
+            currency=_first_present(raw, "currency") or "USD",
             raw_payload=_as_dict(raw),
         )
-
-    # ---- legacy per-account fetcher kept for compatibility ----------
-    # ``_fetch_balance_for`` is still called from ``get_balances`` via
-    # ``_iter_per_account`` because balances genuinely differ per
-    # sub-account (cash account ≠ margin account ≠ IRA cash).
-    #
-    # The old ``_fetch_positions_for`` / ``_fetch_orders_for`` /
-    # ``_fetch_transactions_for`` are intentionally removed — the new
-    # ``_fetch_once_and_dispatch`` replaces them and avoids the
-    # N×duplication bug that produced "5 accounts, 15 positions".
 
     # ------------------------------------------------------------------
     # Snapshot composition
     # ------------------------------------------------------------------
+
 
     def build_snapshot(self, *, date_range: str = "today") -> BrokerSnapshot:
         """Convenience: aggregate accounts + balances + positions +
