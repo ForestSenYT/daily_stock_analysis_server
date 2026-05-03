@@ -842,6 +842,13 @@ class FirstradeReadOnlyClient:
         # keys are filtered before logging — see _safe_keys filter.
         if rows:
             self._log_row_shape(method_names[0], rows[0])
+            # If the row is a bare string (a ticker symbol), the
+            # detailed position object lives in some other attribute
+            # on ``account_data`` (e.g. ``data.positions[ticker]``).
+            # Dump every attribute on the account_data instance so we
+            # can find the right detail source on the next round.
+            if isinstance(rows[0], str):
+                self._log_account_data_attrs(sdk.account_data, rows[0])
 
         results: List[Any] = []
         for raw in rows:
@@ -887,6 +894,66 @@ class FirstradeReadOnlyClient:
         raise _VendorCallFailed(
             "vendor method signature did not match any of (real, *extra) / (real,) / ()"
         )
+
+    @staticmethod
+    def _log_account_data_attrs(account_data: Any, sample_ticker: str) -> None:
+        """Dump every public attribute on ``FTAccountData`` so we can
+        find where vendor stores the position / order / balance
+        details. Called when ``get_positions`` returns bare strings
+        (i.e. tickers) instead of objects — meaning details live
+        elsewhere on the account_data instance.
+
+        Logs SHAPE only (type + keys + sample-key) — never the
+        underlying values, so it's safe even if those dicts contain
+        prices / dollar amounts.
+        """
+        try:
+            public = sorted(k for k in dir(account_data) if not k.startswith("_"))
+        except Exception:
+            return
+        # First, the high-level attribute list so we can spot the
+        # right detail dict.
+        logger.info(
+            "[firstrade] account_data public attrs: %s",
+            public[:60],
+        )
+        # Then, for each attribute that looks like a dict / list, dump
+        # its shape — this is the most useful signal (the one that
+        # has ``sample_ticker`` as a key is almost certainly the
+        # detail source).
+        for attr_name in public:
+            try:
+                attr = getattr(account_data, attr_name, None)
+            except Exception:
+                continue
+            if attr is None or callable(attr):
+                continue
+            if isinstance(attr, dict):
+                keys = list(attr.keys())
+                first_key = keys[0] if keys else None
+                first_val = attr.get(first_key) if first_key is not None else None
+                # Whether ``sample_ticker`` is a key — strong hint
+                # that this is the detail dict for our position rows.
+                ticker_match = sample_ticker in keys
+                logger.info(
+                    "[firstrade] account_data.%s: dict, len=%d, "
+                    "sample_key=%r, sample_value_type=%s, "
+                    "ticker_in_keys=%s",
+                    attr_name,
+                    len(keys),
+                    str(first_key)[:40] if first_key is not None else None,
+                    type(first_val).__name__,
+                    ticker_match,
+                )
+            elif isinstance(attr, (list, tuple)):
+                logger.info(
+                    "[firstrade] account_data.%s: %s, len=%d, "
+                    "first_item_type=%s",
+                    attr_name,
+                    type(attr).__name__,
+                    len(attr),
+                    type(attr[0]).__name__ if attr else None,
+                )
 
     @staticmethod
     def _log_row_shape(method_name: str, sample: Any) -> None:
