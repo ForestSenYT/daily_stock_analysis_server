@@ -1717,17 +1717,17 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "BROKER_FIRSTRADE_PASSWORD": {
         "title": "Firstrade 密码",
         "description": (
-            "Login password. **Not editable from the UI** — set via "
-            "Cloud Run env vars or Secret Manager (e.g. "
-            "`--update-secrets=BROKER_FIRSTRADE_PASSWORD=<secret>:latest`). "
-            "The UI shows whether it's set, but never the value."
+            "Login password. UI-editable per project policy (private "
+            "repo). The value is stored in the operator's runtime.env "
+            "GCS file in plaintext, so anyone with Cloud Storage Object "
+            "Viewer can read it — keep that ACL tight."
         ),
         "category": "broker",
         "data_type": "string",
         "ui_control": "password",
         "is_sensitive": True,
         "is_required": False,
-        "is_editable": False,
+        "is_editable": True,
         "default_value": "",
         "options": [],
         "validation": {},
@@ -1736,15 +1736,15 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "BROKER_FIRSTRADE_PIN": {
         "title": "Firstrade PIN",
         "description": (
-            "Optional login PIN (some accounts require it). Not editable "
-            "from the UI — set via Cloud Run env / Secret Manager."
+            "Optional login PIN (some accounts require it). UI-editable; "
+            "stored in runtime.env GCS file in plaintext."
         ),
         "category": "broker",
         "data_type": "string",
         "ui_control": "password",
         "is_sensitive": True,
         "is_required": False,
-        "is_editable": False,
+        "is_editable": True,
         "default_value": "",
         "options": [],
         "validation": {},
@@ -1789,15 +1789,15 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Optional base32 TOTP secret. When set, the library "
             "auto-generates verification codes (no manual entry "
-            "required). **Not editable from the UI** — set via Cloud "
-            "Run env / Secret Manager."
+            "required). UI-editable; stored in runtime.env GCS file "
+            "in plaintext."
         ),
         "category": "broker",
         "data_type": "string",
         "ui_control": "password",
         "is_sensitive": True,
         "is_required": False,
-        "is_editable": False,
+        "is_editable": True,
         "default_value": "",
         "options": [],
         "validation": {},
@@ -1898,15 +1898,17 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Required when BROKER_FIRSTRADE_ENABLED=true. Used to hash "
             "real account numbers into the public account_hash exposed "
-            "by the API / Agent. **Not editable from the UI** — set via "
-            "Cloud Run env / Secret Manager. Empty value blocks startup."
+            "by the API / Agent. UI-editable; **rotating this value "
+            "invalidates all existing account_hash records** — Agent "
+            "will see brand-new hashes the next sync. Empty value "
+            "blocks startup."
         ),
         "category": "broker",
         "data_type": "string",
         "ui_control": "password",
         "is_sensitive": True,
         "is_required": True,
-        "is_editable": False,
+        "is_editable": True,
         "default_value": "",
         "options": [],
         "validation": {},
