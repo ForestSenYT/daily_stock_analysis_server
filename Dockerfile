@@ -62,8 +62,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 先单独 COPY requirements，让 pip 安装层可以缓存
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-broker.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir -r requirements-broker.txt
 
 # COPY 应用代码（.dockerignore 已经过滤 .env / venv / cache 等）
 COPY . .
