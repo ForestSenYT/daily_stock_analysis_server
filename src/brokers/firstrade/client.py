@@ -837,6 +837,11 @@ class FirstradeReadOnlyClient:
             "%d/%d sample rows are tagged with an account id",
             len(rows), method_names[0], tagged_count, min(5, len(rows)),
         )
+        # Also dump the first row's *shape* (keys / attrs, NO values)
+        # so we can map vendor field names without guessing. Sensitive
+        # keys are filtered before logging — see _safe_keys filter.
+        if rows:
+            self._log_row_shape(method_names[0], rows[0])
 
         results: List[Any] = []
         for raw in rows:
@@ -881,6 +886,53 @@ class FirstradeReadOnlyClient:
         # Every signature attempt raised TypeError — surface that.
         raise _VendorCallFailed(
             "vendor method signature did not match any of (real, *extra) / (real,) / ()"
+        )
+
+    @staticmethod
+    def _log_row_shape(method_name: str, sample: Any) -> None:
+        """Dump the first vendor row's KEYS / ATTR NAMES (never values)
+        so we can see exactly what field names the SDK is using —
+        without that, ``_first_present`` is just guessing and the UI
+        ends up showing dashes everywhere.
+
+        Filters out anything that looks sensitive before logging."""
+        sensitive = {
+            "username", "password", "pin", "mfa_secret", "ftat",
+            "sid", "cookie", "cookies", "authorization", "account",
+            "account_number", "accountno", "accountnumber",
+            "token", "access_token", "secret",
+        }
+        sample_type = type(sample).__name__
+        dict_keys: List[str] = []
+        attr_keys: List[str] = []
+        if isinstance(sample, dict):
+            dict_keys = sorted(str(k) for k in sample.keys())
+        if hasattr(sample, "__dict__"):
+            try:
+                attr_keys = sorted(
+                    k for k in vars(sample).keys() if not k.startswith("_")
+                )
+            except TypeError:
+                attr_keys = []
+        # Public non-callable attrs (covers @property and slots).
+        try:
+            public_attrs = sorted(
+                k for k in dir(sample)
+                if not k.startswith("_")
+                and k.lower() not in sensitive
+            )
+        except Exception:  # pragma: no cover — defensive
+            public_attrs = []
+        safe_dict_keys = [k for k in dict_keys if k.lower() not in sensitive]
+        safe_attr_keys = [k for k in attr_keys if k.lower() not in sensitive]
+        logger.info(
+            "[firstrade] sample row shape from %s: type=%s, "
+            "dict_keys=%s, attr_keys=%s, public_attrs=%s",
+            method_name,
+            sample_type,
+            safe_dict_keys[:40],
+            safe_attr_keys[:40],
+            public_attrs[:40],
         )
 
     @staticmethod
