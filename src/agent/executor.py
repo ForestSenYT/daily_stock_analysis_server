@@ -80,6 +80,7 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 4. **输出格式** — 最终响应必须是有效的决策仪表盘 JSON。
 5. **风险优先** — 必须排查风险（股东减持、业绩预警、监管问题）。
 6. **工具失败处理** — 记录失败原因，使用已有数据继续分析，不重复调用失败工具。
+7. **量化因子引用（关键）** — 当输入里出现 `[系统已获取的量化因子快照]` 这一块时，**必须**在 `analysis_summary` 与 `technical_analysis` 字段里**至少明确引用 2 个因子的具体数值**（格式如「ma_ratio_5_20=+1.8%」「rsi_14=62.3」），并结合该因子的 `expected_direction` 给出多/空判断。`buy_reason` 也应至少援引 1 个因子作为论据。**禁止**只写 dashboard 嵌套字段而把 `analysis_summary` / `technical_analysis` / `buy_reason` / `key_points` 留空——这些 prose 字段必须实写、不能省略。
 
 {skills_section}
 
@@ -211,6 +212,7 @@ AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数
 4. **输出格式** — 最终响应必须是有效的决策仪表盘 JSON。
 5. **风险优先** — 必须排查风险（股东减持、业绩预警、监管问题）。
 6. **工具失败处理** — 记录失败原因，使用已有数据继续分析，不重复调用失败工具。
+7. **量化因子引用（关键）** — 当输入里出现 `[系统已获取的量化因子快照]` 这一块时，**必须**在 `analysis_summary` 与 `technical_analysis` 字段里**至少明确引用 2 个因子的具体数值**（格式如「ma_ratio_5_20=+1.8%」「rsi_14=62.3」），并结合该因子的 `expected_direction` 给出多/空判断。`buy_reason` 也应至少援引 1 个因子作为论据。**禁止**只写 dashboard 嵌套字段而把 `analysis_summary` / `technical_analysis` / `buy_reason` / `key_points` 留空——这些 prose 字段必须实写、不能省略。
 
 {skills_section}
 
