@@ -324,6 +324,71 @@ class ClientReadPathTests(unittest.TestCase):
         self.assertIsInstance(result, list)
 
 
+class AccountIterableShapeTests(unittest.TestCase):
+    """Regression tests for the ``all_accounts`` shape handling.
+
+    ``firstrade==0.0.38`` returns a single account-number string for a
+    one-account user (NOT a list). Without explicit handling, ``list()``
+    would iterate the string character-by-character and produce one
+    pseudo-account per digit — manifesting as "5 accounts, 15 positions"
+    for a real user with 1 account and 3 positions (5 × 3).
+    """
+
+    def test_string_collapses_to_single_account(self) -> None:
+        normalized = FirstradeReadOnlyClient._normalize_accounts_iterable(
+            "12345678"
+        )
+        self.assertEqual(normalized, ["12345678"])
+        self.assertEqual(FirstradeReadOnlyClient._safe_len("12345678"), 1)
+
+    def test_int_collapses_to_single_account(self) -> None:
+        normalized = FirstradeReadOnlyClient._normalize_accounts_iterable(
+            12345678
+        )
+        self.assertEqual(normalized, [12345678])
+        self.assertEqual(FirstradeReadOnlyClient._safe_len(12345678), 1)
+
+    def test_list_passes_through(self) -> None:
+        normalized = FirstradeReadOnlyClient._normalize_accounts_iterable(
+            ["111", "222"]
+        )
+        self.assertEqual(normalized, ["111", "222"])
+        self.assertEqual(
+            FirstradeReadOnlyClient._safe_len(["111", "222"]), 2
+        )
+
+    def test_dict_uses_keys_as_account_numbers(self) -> None:
+        # SDK variant where {account_number: {details...}} is returned.
+        normalized = FirstradeReadOnlyClient._normalize_accounts_iterable(
+            {"111": {"name": "A"}, "222": {"name": "B"}}
+        )
+        # When values are dicts, we merge an _account_key marker so the
+        # extractor can pull the number; account_number ends up either
+        # in the merged dict (under _account_key) or via _first_present.
+        self.assertEqual(len(normalized), 2)
+
+    def test_none_returns_empty(self) -> None:
+        self.assertEqual(
+            FirstradeReadOnlyClient._normalize_accounts_iterable(None), [],
+        )
+        self.assertEqual(FirstradeReadOnlyClient._safe_len(None), 0)
+
+    def test_string_account_one_account_end_to_end(self) -> None:
+        """The full bug scenario: one account expressed as a bare string."""
+        _install_fake_sdk(accounts="12345678")  # NOT a list — a bare string
+        try:
+            client = FirstradeReadOnlyClient(_make_config())
+            result = client.login()
+            self.assertEqual(result.status, "ok")
+            # account_count must be 1, not 8.
+            self.assertEqual(result.account_count, 1)
+            accounts = client.list_accounts()
+            self.assertEqual(len(accounts), 1)
+            self.assertEqual(accounts[0].account_last4, "5678")
+        finally:
+            _uninstall_fake_sdk()
+
+
 # =====================================================================
 # 4) Module-import safety
 # =====================================================================

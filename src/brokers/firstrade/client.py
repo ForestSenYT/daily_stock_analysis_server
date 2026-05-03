@@ -359,7 +359,8 @@ class FirstradeReadOnlyClient:
             return []
         accounts: List[BrokerAccount] = []
         try:
-            raw_accounts = list(getattr(sdk.account_data, "all_accounts", []) or [])
+            raw_attr = getattr(sdk.account_data, "all_accounts", None)
+            raw_accounts = self._normalize_accounts_iterable(raw_attr)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[firstrade] list_accounts iteration failed: %s",
@@ -511,10 +512,53 @@ class FirstradeReadOnlyClient:
 
     @staticmethod
     def _safe_len(seq: Any) -> int:
+        # IMPORTANT: do NOT call list() on bare strings — Python iterates
+        # them character-by-character (e.g. ``len(list("12345")) == 5``)
+        # which would mis-count a single account as N accounts. Route
+        # through the normalizer so the count matches what
+        # ``list_accounts`` actually iterates over.
         try:
-            return len(list(seq or []))
+            return len(FirstradeReadOnlyClient._normalize_accounts_iterable(seq))
         except Exception:
             return 0
+
+    @staticmethod
+    def _normalize_accounts_iterable(raw: Any) -> List[Any]:
+        """Coerce vendor's ``all_accounts`` into a real list, regardless
+        of its actual shape.
+
+        ``firstrade==0.0.38`` returns a **single account-number string**
+        for a one-account user; older / newer revisions sometimes wrap
+        accounts in a dict (`{"12345678": {...details}}`) or a tuple or
+        a fancy iterator. We DON'T want ``list("12345678")`` because
+        that expands to per-character pseudo-accounts.
+        """
+        if raw is None:
+            return []
+        # Single scalar — wrap as one element. ``bytes`` included for
+        # safety even though we don't expect them.
+        if isinstance(raw, (str, bytes, int)):
+            return [raw]
+        # Dict — typically maps account_number → details. Keys ARE the
+        # account numbers; values are extra metadata we currently don't
+        # use, but we preserve them inside ``raw_payload`` if present
+        # by returning ``{key, **value}`` shaped dicts.
+        if isinstance(raw, dict):
+            normalized: List[Any] = []
+            for k, v in raw.items():
+                if isinstance(v, dict):
+                    merged = {**v, "_account_key": k}
+                    normalized.append(merged)
+                else:
+                    normalized.append(k)
+            return normalized
+        # Lists / tuples / sets / iterators — convert generically. The
+        # try/except guards against exotic types whose ``__iter__``
+        # raises (e.g. lazy proxies).
+        try:
+            return list(raw)
+        except Exception:
+            return []
 
     # Cache so we only log dropped-kwarg warnings once per class+kwargset.
     _LOGGED_DROPPED_KWARGS: set = set()
