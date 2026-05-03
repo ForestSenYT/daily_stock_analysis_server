@@ -367,6 +367,16 @@ class FirstradeReadOnlyClient:
                 _sanitize_exception(exc),
             )
             return []
+        # Always log a one-line diagnosis of the raw shape (no account
+        # numbers!) so SDK-version drift is visible from Cloud Run logs
+        # without needing a debug endpoint.
+        logger.info(
+            "[firstrade] list_accounts: vendor returned attr_type=%s, "
+            "iterable_len=%d, item_types=%s",
+            type(raw_attr).__name__,
+            len(raw_accounts),
+            [type(r).__name__ for r in raw_accounts[:5]],
+        )
         salt = self._salt()
         skipped = 0
         for raw in raw_accounts:
