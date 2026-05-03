@@ -1,0 +1,20 @@
+# ===================================
+# Optional Broker Connectors
+# ===================================
+# Install only when you intentionally enable the read-only Firstrade
+# integration (`BROKER_FIRSTRADE_ENABLED=true`). The base service
+# (Cloud Run image, default ``requirements.txt``) MUST stay lean and
+# functional without any of these packages — every code path that
+# touches them does so via lazy ``import ... ; except ImportError``.
+#
+# Install:
+#     pip install -r requirements-broker.txt
+#
+# Notes:
+# - ``firstrade`` is an unofficial reverse-engineered package
+#   (https://github.com/MaxxRK/firstrade-api). It can break when
+#   firstrade.com changes; pin the version. The DSA project uses
+#   it READ-ONLY: account / balances / positions / orders /
+#   transactions. We never import ``firstrade.order``, never call
+#   place_order / cancel_order / place_option_order.
+firstrade==0.0.38

@@ -5,6 +5,7 @@ import { portfolioApi } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
+import FirstradeSyncPanel from '../components/portfolio/FirstradeSyncPanel';
 import { toDateInputValue } from '../utils/format';
 import type {
   PortfolioAccountItem,
@@ -1174,6 +1175,10 @@ const PortfolioPage: React.FC = () => {
             <button type="submit" className="btn-secondary w-full" disabled={!writableAccountId}>提交企业行为</button>
           </form>
         </Card>
+      </section>
+
+      <section className="grid grid-cols-1 gap-3">
+        <FirstradeSyncPanel />
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-3">

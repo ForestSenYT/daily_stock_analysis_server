@@ -11,7 +11,7 @@ API v1 路由聚合
 
 from fastapi import APIRouter
 
-from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research
+from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research, broker
 
 # 创建 v1 版本主路由
 router = APIRouter(prefix="/api/v1")
@@ -84,4 +84,15 @@ router.include_router(
     quant_research.router,
     prefix="/quant",
     tags=["QuantResearch"]
+)
+
+# Broker read-only connectors (Firstrade, …).
+# Strictly read-only: the namespace exposes status / login / sync /
+# masked snapshot endpoints — no place_order, no cancel_order, no
+# trading capability. All endpoints honor BROKER_FIRSTRADE_ENABLED
+# and return ``not_enabled`` when the flag is off.
+router.include_router(
+    broker.router,
+    prefix="/broker",
+    tags=["Broker"],
 )

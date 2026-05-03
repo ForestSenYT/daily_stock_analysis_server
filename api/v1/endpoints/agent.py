@@ -41,6 +41,9 @@ TOOL_DISPLAY_NAMES: Dict[str, str] = {
     "run_quant_factor_backtest":   "运行研究回测",
     "get_quant_research_run":      "获取研究回测结果",
     "get_quant_portfolio_risk":    "评估组合研究风险",
+    # Broker read-only tools (opt-in via BROKER_FIRSTRADE_ENABLED;
+    # tool itself never logs into Firstrade or places trades).
+    "get_live_broker_portfolio_snapshot": "读取券商持仓快照",
 }
 
 logger = logging.getLogger(__name__)

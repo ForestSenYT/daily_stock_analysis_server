@@ -182,6 +182,21 @@ def get_tool_registry():
     ):
         registry.register(tool_fn)
 
+    # Optional broker tools — only registered when BROKER_FIRSTRADE_ENABLED
+    # is true at process boot (stricter posture than quant_research, which
+    # always registers and gates at call time). Wrapped in try/except so an
+    # import-time bug in the broker package can never break the agent for
+    # anyone else.
+    try:
+        from src.config import get_config as _get_config_for_broker  # noqa: WPS433
+        _broker_cfg = _get_config_for_broker()
+        if getattr(_broker_cfg, "broker_firstrade_enabled", False):
+            from src.agent.tools.broker_tools import ALL_BROKER_TOOLS  # noqa: WPS433
+            for tool_fn in ALL_BROKER_TOOLS:
+                registry.register(tool_fn)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("[AgentFactory] Broker tools unavailable: %s", exc)
+
     _TOOL_REGISTRY = registry
     logger.info("[AgentFactory] ToolRegistry cached (%d tools)", len(registry._tools) if hasattr(registry, "_tools") else -1)
     return _TOOL_REGISTRY

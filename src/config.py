@@ -128,6 +128,27 @@ def parse_env_int(
     return parsed
 
 
+# Allowed values for ``BROKER_FIRSTRADE_LLM_DATA_SCOPE``. Anything else
+# falls back to ``positions_and_balances`` (the default exposed to LLMs).
+_BROKER_LLM_SCOPE_VALUES = ("positions_only", "positions_and_balances", "full")
+
+
+def _normalize_broker_llm_scope(value: Optional[str]) -> str:
+    """Normalize the configured broker LLM scope, falling back if invalid."""
+    if not value:
+        return "positions_and_balances"
+    cleaned = str(value).strip().lower()
+    if cleaned in _BROKER_LLM_SCOPE_VALUES:
+        return cleaned
+    logger.warning(
+        "BROKER_FIRSTRADE_LLM_DATA_SCOPE=%r is not a recognized value; "
+        "expected one of %s; falling back to 'positions_and_balances'.",
+        value,
+        list(_BROKER_LLM_SCOPE_VALUES),
+    )
+    return "positions_and_balances"
+
+
 def parse_env_float(
     value: Optional[str],
     default: float,
@@ -810,6 +831,31 @@ class Config:
     # AI 决策回测（``/api/v1/backtest/*``）、Agent、分析主链路。
     quant_research_enabled: bool = False
 
+    # === Firstrade Broker Read-only Connector 配置 ===
+    # 通过非官方 ``firstrade`` PyPI 包 (MaxxRK/firstrade-api) 同步 Firstrade
+    # 账户 / 余额 / 持仓 / 订单 / 交易历史快照到本地 SQLite，让 Agent 在
+    # 组合分析与个股建议中使用真实持仓上下文。**第一版严格只读**：
+    # 永远不会下单、不会撤单、不会触发期权交易；Agent 只读取本地快照，
+    # 永远不会自己登录 Firstrade。默认关闭。
+    broker_firstrade_enabled: bool = False
+    broker_firstrade_read_only: bool = True            # 始终为 True；保留作为防御层
+    broker_firstrade_trading_enabled: bool = False     # 即使为 True 也无交易能力
+    broker_firstrade_username: str = ""
+    broker_firstrade_password: str = ""
+    broker_firstrade_pin: str = ""
+    broker_firstrade_email: str = ""
+    broker_firstrade_phone: str = ""
+    broker_firstrade_mfa_secret: str = ""
+    broker_firstrade_profile_path: str = "./data/broker_sessions/firstrade"
+    broker_firstrade_save_session: bool = True
+    broker_firstrade_sync_interval_seconds: int = 60   # clamp 后续 [30, 3600]
+    broker_firstrade_sync_market_hours_only: bool = True
+    broker_firstrade_llm_data_scope: str = "positions_and_balances"
+    # 用于把真实 Firstrade 账号哈希成 ``account_hash`` 暴露给 API/Agent。
+    # ``BROKER_FIRSTRADE_ENABLED=true`` 时启动期 fail-fast 要求非空，避免
+    # 跨部署可关联的弱哈希盐。
+    broker_account_hash_salt: str = ""
+
     # === 输入校验加固（防 LLM 幻觉） ===
     # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
     # 都查不到数据时，是否短路——直接拒绝继续分析，避免 LLM 凭训练
@@ -1285,8 +1331,8 @@ class Config:
         report_language_raw = cls._resolve_report_language_env_value(
             preexisting_report_language
         )
-        
-        return cls(
+
+        config = cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
@@ -1495,6 +1541,38 @@ class Config:
                 minimum=0.0,
             ),
             quant_research_enabled=os.getenv('QUANT_RESEARCH_ENABLED', 'false').lower() == 'true',
+            broker_firstrade_enabled=parse_env_bool(os.getenv('BROKER_FIRSTRADE_ENABLED'), False),
+            broker_firstrade_read_only=parse_env_bool(os.getenv('BROKER_FIRSTRADE_READ_ONLY'), True),
+            broker_firstrade_trading_enabled=parse_env_bool(
+                os.getenv('BROKER_FIRSTRADE_TRADING_ENABLED'), False,
+            ),
+            broker_firstrade_username=(os.getenv('BROKER_FIRSTRADE_USERNAME') or '').strip(),
+            broker_firstrade_password=(os.getenv('BROKER_FIRSTRADE_PASSWORD') or ''),
+            broker_firstrade_pin=(os.getenv('BROKER_FIRSTRADE_PIN') or '').strip(),
+            broker_firstrade_email=(os.getenv('BROKER_FIRSTRADE_EMAIL') or '').strip(),
+            broker_firstrade_phone=(os.getenv('BROKER_FIRSTRADE_PHONE') or '').strip(),
+            broker_firstrade_mfa_secret=(os.getenv('BROKER_FIRSTRADE_MFA_SECRET') or '').strip(),
+            broker_firstrade_profile_path=(
+                os.getenv('BROKER_FIRSTRADE_PROFILE_PATH')
+                or './data/broker_sessions/firstrade'
+            ).strip() or './data/broker_sessions/firstrade',
+            broker_firstrade_save_session=parse_env_bool(
+                os.getenv('BROKER_FIRSTRADE_SAVE_SESSION'), True,
+            ),
+            broker_firstrade_sync_interval_seconds=parse_env_int(
+                os.getenv('BROKER_FIRSTRADE_SYNC_INTERVAL_SECONDS'),
+                60,
+                field_name='BROKER_FIRSTRADE_SYNC_INTERVAL_SECONDS',
+                minimum=30,
+                maximum=3600,
+            ),
+            broker_firstrade_sync_market_hours_only=parse_env_bool(
+                os.getenv('BROKER_FIRSTRADE_SYNC_MARKET_HOURS_ONLY'), True,
+            ),
+            broker_firstrade_llm_data_scope=_normalize_broker_llm_scope(
+                os.getenv('BROKER_FIRSTRADE_LLM_DATA_SCOPE'),
+            ),
+            broker_account_hash_salt=(os.getenv('BROKER_ACCOUNT_HASH_SALT') or '').strip(),
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -1616,7 +1694,19 @@ class Config:
             ),
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true'
         )
-    
+        # Broker startup gate — fail-fast if the Firstrade integration is
+        # turned on without a configured account-hash salt. A missing salt
+        # would force a hardcoded fallback that's correlatable across
+        # deployments, which weakens the masking story for ``account_hash``.
+        if config.broker_firstrade_enabled and not config.broker_account_hash_salt:
+            raise RuntimeError(
+                "BROKER_FIRSTRADE_ENABLED=true requires "
+                "BROKER_ACCOUNT_HASH_SALT to be set (any non-empty random "
+                "string, kept secret). Refusing to boot rather than expose "
+                "weakly-hashed account identifiers."
+            )
+        return config
+
     @classmethod
     def _parse_litellm_yaml(cls, config_path: str) -> List[Dict[str, Any]]:
         """Parse a standard LiteLLM config YAML file into Router model_list.

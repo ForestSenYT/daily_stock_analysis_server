@@ -625,6 +625,78 @@ class LLMUsage(Base):
     called_at = Column(DateTime, default=datetime.now, index=True)
 
 
+class BrokerSyncRun(Base):
+    """One row per Firstrade (or any future broker) sync_now() call.
+
+    Persisted regardless of success so operators / the WebUI can see
+    why the most recent sync failed without needing access to logs.
+    No credentials, cookies, tokens, or full account numbers ever
+    reach this table — the snapshot service redacts upstream and the
+    repo redacts again as a defense layer.
+    """
+
+    __tablename__ = 'broker_sync_runs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    broker = Column(String(32), nullable=False, index=True, default='firstrade')
+    status = Column(String(32), nullable=False)  # ok | failed | skipped
+    message = Column(String(512), nullable=True)
+    started_at = Column(DateTime, default=datetime.now, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    account_count = Column(Integer, nullable=False, default=0)
+    position_count = Column(Integer, nullable=False, default=0)
+    order_count = Column(Integer, nullable=False, default=0)
+    transaction_count = Column(Integer, nullable=False, default=0)
+    error_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_broker_sync_run_broker_started', 'broker', 'started_at'),
+    )
+
+
+class BrokerSnapshot(Base):
+    """Single discriminator-keyed table that stores account / balance /
+    position / order / transaction snapshots from a read-only broker.
+
+    Schema rationale:
+      * One save path = one redaction enforcement point. Repo always
+        runs ``redact_sensitive_payload`` before INSERT.
+      * Indexable columns (``snapshot_type``, ``account_hash``,
+        ``as_of`` desc, ``symbol``) cover every read pattern the agent
+        tool / API uses; the JSON ``payload_json`` carries the
+        scrubbed full body.
+      * ``account_alias`` and ``account_last4`` live as columns (not
+        only inside the JSON) so the agent tool can render labels even
+        when the in-memory ``_account_map`` is empty after a restart.
+      * No raw-account-number column. Ever.
+    """
+
+    __tablename__ = 'broker_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    broker = Column(String(32), nullable=False, index=True, default='firstrade')
+    snapshot_type = Column(String(16), nullable=False, index=True)  # account | balance | position | order | transaction
+    account_hash = Column(String(32), nullable=False, index=True)
+    account_last4 = Column(String(8), nullable=True)
+    account_alias = Column(String(64), nullable=True)
+    entity_hash = Column(String(32), nullable=True, index=True)  # order_id_hash / transaction_id_hash
+    symbol = Column(String(16), nullable=True, index=True)
+    payload_json = Column(Text, nullable=False)  # already redacted JSON
+    as_of = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        # Composite index covering the agent's primary access pattern:
+        # "give me the latest <type> for <account_hash> ordered newest-first".
+        Index(
+            'ix_broker_snapshot_type_account_as_of',
+            'snapshot_type', 'account_hash', 'as_of',
+        ),
+        Index('ix_broker_snapshot_broker_type_as_of', 'broker', 'snapshot_type', 'as_of'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式
