@@ -1019,7 +1019,159 @@ class AgentOrchestrator:
         payload["key_points"] = key_points
         payload["risk_warning"] = risk_warning
         payload["dashboard"] = dashboard_block
+        # ----- Prose field fan-out (multi-agent path) -----
+        # Each sub-agent (technical / fundamental / intel / risk) drops
+        # rich ``reasoning`` text into its ``AgentOpinion``. The legacy
+        # composer dropped that on the floor, so the API response had
+        # ``technical_analysis = ""`` etc. even though the underlying
+        # data was rich. We now route those reasoning blocks (plus
+        # derived summaries from the dashboard) into the 16 schema
+        # prose fields the FE expects.
+        prose = self._compose_prose_fields(
+            ctx=ctx,
+            payload=payload,
+            dashboard_block=dashboard_block,
+            risk_alerts=risk_alerts,
+            analysis_summary=analysis_summary,
+        )
+        for field, value in prose.items():
+            # Prefer LLM-provided value if it's already non-empty.
+            existing = payload.get(field)
+            if isinstance(existing, str) and existing.strip():
+                continue
+            if value:
+                payload[field] = value
         return payload
+
+    def _compose_prose_fields(
+        self,
+        *,
+        ctx: "AgentContext",
+        payload: Dict[str, Any],
+        dashboard_block: Dict[str, Any],
+        risk_alerts: List[str],
+        analysis_summary: str,
+    ) -> Dict[str, str]:
+        """Populate the 16 prose fields from sub-agent opinions.
+
+        Sources (in priority order):
+          * ``technical`` opinion → trend / technical / ma / volume /
+            pattern fields
+          * ``fundamental`` opinion → fundamental / sector / company
+          * ``intel`` opinion → news / sentiment / hot_topics
+          * Dashboard ``data_perspective`` and ``intelligence`` blocks
+            → derived summary text when an opinion is missing
+          * Fallback to ``analysis_summary`` so no field is empty when
+            the analysis itself succeeded.
+        """
+        def _opinion_reasoning(names: set) -> str:
+            op = self._latest_opinion(ctx, names)
+            text = getattr(op, "reasoning", "") if op else ""
+            return text.strip() if isinstance(text, str) else ""
+
+        def _opinion_raw(names: set) -> Dict[str, Any]:
+            op = self._latest_opinion(ctx, names)
+            raw = getattr(op, "raw_data", None) if op else None
+            return raw if isinstance(raw, dict) else {}
+
+        technical_text = _opinion_reasoning({"technical"})
+        technical_raw = _opinion_raw({"technical"})
+        fundamental_text = _opinion_reasoning({"fundamental"})
+        fundamental_raw = _opinion_raw({"fundamental"})
+        intel_text = _opinion_reasoning({"intel"})
+        intel_raw = _opinion_raw({"intel"})
+        risk_text = _opinion_reasoning({"risk"})
+
+        data_perspective = dashboard_block.get("data_perspective") or {}
+        if not isinstance(data_perspective, dict):
+            data_perspective = {}
+        price_position = data_perspective.get("price_position") or {}
+        volume_analysis_block = data_perspective.get("volume_analysis") or {}
+        intelligence_block = dashboard_block.get("intelligence") or {}
+        positive_catalysts = intelligence_block.get("positive_catalysts") or []
+
+        def _ma_summary() -> str:
+            if not isinstance(price_position, dict):
+                return ""
+            ma5 = price_position.get("ma5")
+            ma10 = price_position.get("ma10")
+            ma20 = price_position.get("ma20")
+            bias = price_position.get("bias_ma5")
+            bias_status = price_position.get("bias_status")
+            parts: List[str] = []
+            if ma5 is not None and ma10 is not None and ma20 is not None:
+                parts.append(f"MA5={ma5}, MA10={ma10}, MA20={ma20}")
+            if bias is not None:
+                parts.append(f"乖离率(MA5)={bias}% ({bias_status or ''})".strip())
+            return "；".join(parts)
+
+        def _volume_summary() -> str:
+            if not isinstance(volume_analysis_block, dict):
+                return ""
+            status = volume_analysis_block.get("volume_status") or ""
+            meaning = volume_analysis_block.get("volume_meaning") or ""
+            if status and meaning:
+                return f"{status}。{meaning}"
+            return status or meaning or ""
+
+        prose: Dict[str, str] = {}
+
+        # --- Trend / technical ---
+        prose["trend_analysis"] = technical_text or analysis_summary
+        prose["technical_analysis"] = technical_text or _ma_summary() or analysis_summary
+        prose["ma_analysis"] = _ma_summary() or technical_text
+        prose["volume_analysis"] = _volume_summary() or technical_text
+        prose["pattern_analysis"] = (
+            str(technical_raw.get("pattern_summary") or "").strip()
+            or technical_text
+        )
+        prose["short_term_outlook"] = (
+            str(technical_raw.get("short_term_outlook") or "").strip()
+            or analysis_summary
+        )
+        prose["medium_term_outlook"] = (
+            str(technical_raw.get("medium_term_outlook") or "").strip()
+            or analysis_summary
+        )
+
+        # --- Fundamentals ---
+        prose["fundamental_analysis"] = fundamental_text or analysis_summary
+        prose["sector_position"] = (
+            str(fundamental_raw.get("sector_position") or "").strip()
+            or fundamental_text
+        )
+        prose["company_highlights"] = (
+            str(fundamental_raw.get("company_highlights") or "").strip()
+            or fundamental_text
+        )
+
+        # --- Intelligence / sentiment ---
+        prose["news_summary"] = intel_text or analysis_summary
+        prose["market_sentiment"] = (
+            str(intel_raw.get("market_sentiment") or "").strip()
+            or intel_text
+        )
+        if isinstance(positive_catalysts, list) and positive_catalysts:
+            prose["hot_topics"] = "、".join(str(c).strip() for c in positive_catalysts[:5])
+        else:
+            prose["hot_topics"] = intel_text
+
+        # --- Decision rationale ---
+        # buy_reason: synthesise from trend + technical + risk to
+        # justify the operation_advice. Quant factors (already cited
+        # by the technical agent's reasoning, since they're injected
+        # into the user message upstream) flow through here naturally.
+        buy_reason_parts: List[str] = []
+        if technical_text:
+            buy_reason_parts.append(technical_text)
+        if risk_text:
+            buy_reason_parts.append(f"风险考量：{risk_text}")
+        prose["buy_reason"] = "；".join(buy_reason_parts) or analysis_summary
+
+        # --- key_points / risk_warning are already filled in the
+        # caller (lines 996-1010); we don't override them here.
+
+        return {k: v for k, v in prose.items() if isinstance(v, str) and v.strip()}
 
     def _collect_key_levels(
         self,
