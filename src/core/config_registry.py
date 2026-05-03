@@ -69,6 +69,20 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
         "display_order": 65,
     },
     {
+        "category": "broker",
+        "title": "Broker — Firstrade (Read-only)",
+        "description": (
+            "Firstrade read-only broker connector — syncs accounts / "
+            "balances / positions / orders / transactions snapshots into "
+            "local SQLite for the AI Agent to reason over. **Strict "
+            "read-only**: this section never enables real-trading code "
+            "paths. Sensitive credentials (password / PIN / MFA secret / "
+            "account hash salt) are not editable from the UI; set them "
+            "via Cloud Run env vars or Secret Manager."
+        ),
+        "display_order": 66,
+    },
+    {
         "category": "uncategorized",
         "title": "Uncategorized",
         "description": "Keys not mapped in the field registry.",
@@ -1617,6 +1631,287 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 10,
     },
+    # ------------------------------------------------------------------
+    # Broker — Firstrade Read-only Connector
+    # ------------------------------------------------------------------
+    # The 15 BROKER_FIRSTRADE_* / BROKER_ACCOUNT_HASH_SALT fields are
+    # split between safe-to-edit-via-UI (toggles, scope, alias inputs)
+    # and credential fields that must NOT be editable from the WebUI
+    # (the registry exposes them as read-only labels so operators can
+    # see whether they're set, but not change them — those go via
+    # Cloud Run env / Secret Manager).
+    "BROKER_FIRSTRADE_ENABLED": {
+        "title": "Firstrade 只读同步",
+        "description": (
+            "Master switch for the Firstrade read-only broker integration. "
+            "When off, /api/v1/broker/firstrade/* return not_enabled and "
+            "the Agent broker tool is not registered. Enabling requires "
+            "BROKER_ACCOUNT_HASH_SALT to also be set — the process refuses "
+            "to boot if the salt is empty."
+        ),
+        "category": "broker",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 10,
+    },
+    "BROKER_FIRSTRADE_READ_ONLY": {
+        "title": "Firstrade 只读保护",
+        "description": (
+            "Defense-in-depth flag — should always be true. Setting it "
+            "to false has NO effect (no real-trading code paths exist). "
+            "Locked on in the UI to communicate intent."
+        ),
+        "category": "broker",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": False,  # locked True — flipping does nothing
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 20,
+    },
+    "BROKER_FIRSTRADE_TRADING_ENABLED": {
+        "title": "Firstrade 交易（永久禁用）",
+        "description": (
+            "Hardcoded to false. The project intentionally implements "
+            "no order placement / cancellation / option trading. Even "
+            "if this flag is true, no trade can be sent because no "
+            "such code path exists. Locked off in the UI."
+        ),
+        "category": "broker",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": False,  # locked False — UI must not flip
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 30,
+    },
+    "BROKER_FIRSTRADE_USERNAME": {
+        "title": "Firstrade 用户名",
+        "description": (
+            "Login identifier. UI-editable for operator convenience, but "
+            "consider moving to Secret Manager for production deployments."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 40,
+    },
+    "BROKER_FIRSTRADE_PASSWORD": {
+        "title": "Firstrade 密码",
+        "description": (
+            "Login password. **Not editable from the UI** — set via "
+            "Cloud Run env vars or Secret Manager (e.g. "
+            "`--update-secrets=BROKER_FIRSTRADE_PASSWORD=<secret>:latest`). "
+            "The UI shows whether it's set, but never the value."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": False,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 50,
+    },
+    "BROKER_FIRSTRADE_PIN": {
+        "title": "Firstrade PIN",
+        "description": (
+            "Optional login PIN (some accounts require it). Not editable "
+            "from the UI — set via Cloud Run env / Secret Manager."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": False,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 60,
+    },
+    "BROKER_FIRSTRADE_EMAIL": {
+        "title": "Firstrade 邮箱（MFA）",
+        "description": (
+            "Optional — forces email-based MFA challenge. The user "
+            "must enter the verification code in the WebUI panel."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 70,
+    },
+    "BROKER_FIRSTRADE_PHONE": {
+        "title": "Firstrade 手机号（MFA）",
+        "description": (
+            "Optional — forces SMS-based MFA challenge. The user "
+            "must enter the verification code in the WebUI panel."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 80,
+    },
+    "BROKER_FIRSTRADE_MFA_SECRET": {
+        "title": "Firstrade TOTP Secret",
+        "description": (
+            "Optional base32 TOTP secret. When set, the library "
+            "auto-generates verification codes (no manual entry "
+            "required). **Not editable from the UI** — set via Cloud "
+            "Run env / Secret Manager."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": False,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 90,
+    },
+    "BROKER_FIRSTRADE_PROFILE_PATH": {
+        "title": "Firstrade Session 目录",
+        "description": (
+            "Local path for vendor-managed session cookies. Cloud Run "
+            "deployments should point this at the GCS-mounted "
+            "/mnt/persistent/data/broker_sessions/firstrade for cross-"
+            "instance persistence."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "./data/broker_sessions/firstrade",
+        "options": [],
+        "validation": {},
+        "display_order": 100,
+    },
+    "BROKER_FIRSTRADE_SAVE_SESSION": {
+        "title": "保存 Firstrade Session",
+        "description": (
+            "Persist the vendor session file to disk so a process "
+            "restart doesn't always re-trigger MFA."
+        ),
+        "category": "broker",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 110,
+    },
+    "BROKER_FIRSTRADE_SYNC_INTERVAL_SECONDS": {
+        "title": "同步间隔（秒）",
+        "description": (
+            "Reserved for future scheduled sync. v1 only triggers sync "
+            "manually via the WebUI / API. Clamped to [30, 3600]."
+        ),
+        "category": "broker",
+        "data_type": "integer",
+        "ui_control": "number",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "60",
+        "options": [],
+        "validation": {"min": 30, "max": 3600},
+        "display_order": 120,
+    },
+    "BROKER_FIRSTRADE_SYNC_MARKET_HOURS_ONLY": {
+        "title": "仅在交易时段同步",
+        "description": (
+            "Reserved for future scheduled sync. When true, the future "
+            "cron will skip outside US market hours."
+        ),
+        "category": "broker",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 130,
+    },
+    "BROKER_FIRSTRADE_LLM_DATA_SCOPE": {
+        "title": "LLM 可见范围",
+        "description": (
+            "How much broker data the Agent tool surfaces to the LLM: "
+            "positions_only (minimal) / positions_and_balances "
+            "(default) / full (also includes open orders + recent "
+            "transactions). Invalid values fall back to "
+            "positions_and_balances."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "select",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "positions_and_balances",
+        "options": ["positions_only", "positions_and_balances", "full"],
+        "validation": {},
+        "display_order": 140,
+    },
+    "BROKER_ACCOUNT_HASH_SALT": {
+        "title": "账号哈希盐（必填）",
+        "description": (
+            "Required when BROKER_FIRSTRADE_ENABLED=true. Used to hash "
+            "real account numbers into the public account_hash exposed "
+            "by the API / Agent. **Not editable from the UI** — set via "
+            "Cloud Run env / Secret Manager. Empty value blocks startup."
+        ),
+        "category": "broker",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": True,
+        "is_editable": False,
+        "default_value": "",
+        "options": [],
+        "validation": {},
+        "display_order": 150,
+    },
     "AGENT_MODE": {
         "title": "Agent Mode",
         "description": "Enable ReAct Agent for stock analysis.",
@@ -2003,6 +2298,10 @@ def _infer_category(key: str) -> str:
         return "base"
     if key.startswith("BACKTEST_"):
         return "backtest"
+    if key.startswith("BROKER_") or key == "BROKER_ACCOUNT_HASH_SALT":
+        return "broker"
+    if key.startswith("QUANT_RESEARCH_"):
+        return "quant"
     if key.startswith(("GEMINI_", "OPENAI_", "ANTHROPIC_", "LITELLM_", "AIHUBMIX_", "DEEPSEEK_", "LLM_")):
         return "ai_model"
     if key.endswith("_PRIORITY") or key.startswith(
