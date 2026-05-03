@@ -415,6 +415,7 @@ class StockAnalysisPipeline:
                     chip_data,
                     fundamental_context,
                     trend_result,
+                    quant_signals,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -860,15 +861,16 @@ class StockAnalysisPipeline:
             logger.warning("[%s] Agent history prefetch failed: %s", code, e)
 
     def _analyze_with_agent(
-        self, 
-        code: str, 
-        report_type: ReportType, 
+        self,
+        code: str,
+        report_type: ReportType,
         query_id: str,
         stock_name: str,
         realtime_quote: Any,
         chip_data: Optional[ChipDistribution],
         fundamental_context: Optional[Dict[str, Any]] = None,
         trend_result: Optional[TrendAnalysisResult] = None,
+        quant_signals: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
