@@ -10,6 +10,7 @@ Responsible for:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -55,6 +56,22 @@ output a structured JSON opinion.
 3. Analyse volume and chip distribution
 4. Identify chart patterns
 
+## Quant factor snapshot (when provided)
+The user message may include a ``[Quant factor snapshot]`` JSON block \
+listing pre-computed builtin factors (id, value, expected_direction, \
+description). When present:
+- Your ``reasoning`` MUST cite **at least 2 distinct factor values** by \
+  id+value (e.g. ``rsi_14=64.8``, ``ma_ratio_5_20=+1.8%``, \
+  ``volatility_20=0.018``) and align the bullish / bearish read with \
+  each factor's ``expected_direction``.
+- Prefer factors that are NOT already redundant with MA / RSI \
+  (``volatility_20``, ``volume_zscore_20``, ``turnover_or_volume_proxy``, \
+  ``macd_histogram``, ``return_5d``) so the analysis adds signal beyond \
+  what the trend tools already produce.
+- Treat factor values as observational evidence, not forecasts. Don't \
+  fabricate IDs or values — if a factor isn't in the block, don't \
+  reference it.
+
 {baseline}
 {skills}
 ## Output Format
@@ -62,7 +79,7 @@ Return **only** a JSON object (no markdown fences):
 {{
   "signal": "strong_buy|buy|hold|sell|strong_sell",
   "confidence": 0.0-1.0,
-  "reasoning": "2-3 sentence summary",
+  "reasoning": "2-3 sentence summary that cites ≥2 quant factor id+value pairs when the snapshot was provided",
   "key_levels": {{
     "support": <float>,
     "resistance": <float>,
@@ -79,6 +96,20 @@ Return **only** a JSON object (no markdown fences):
         parts = [f"Perform technical analysis on stock **{ctx.stock_code}**"]
         if ctx.stock_name:
             parts[0] += f" ({ctx.stock_name})"
+        # Inject the pipeline-computed quant factor snapshot so the
+        # technical agent's reasoning can cite specific factor values
+        # (rsi_14, volatility_20, etc.) rather than re-deriving them
+        # via tools. The orchestrator pre-populates this from
+        # ``initial_context["quant_signals"]``.
+        quant_signals = ctx.get_data("quant_signals")
+        if quant_signals:
+            parts.append(
+                "\n[Quant factor snapshot — each row carries `id`, `value`, "
+                "`expected_direction` (positive/negative/unknown for forward "
+                "returns), and `description`. Cite at least 2 factor values "
+                "in your `reasoning`.]\n"
+                f"{json.dumps(quant_signals, ensure_ascii=False)}"
+            )
         parts.append("Use your tools to fetch any missing data, then output the JSON opinion.")
         return "\n".join(parts)
 
