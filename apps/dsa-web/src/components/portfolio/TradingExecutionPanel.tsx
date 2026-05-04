@@ -390,7 +390,7 @@ function renderResultInfo(
   }
 }
 
-function statusLabel(row: TradeExecution): JSX.Element {
+function statusLabel(row: TradeExecution): React.ReactNode {
   const map: Record<string, { label: string; cls: string }> = {
     pending: { label: '处理中', cls: 'bg-info/10 text-info' },
     filled: { label: '已成交', cls: 'bg-success/10 text-success' },
