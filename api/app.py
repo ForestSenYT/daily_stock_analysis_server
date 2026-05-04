@@ -119,9 +119,27 @@ from src.services.system_config_service import SystemConfigService
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
+    # Broker auto-sync background worker (best-effort; no-op when
+    # BROKER_FIRSTRADE_AUTO_SYNC_ENABLED=false). Daemon thread, joins
+    # automatically on process exit; we still call stop_auto_sync()
+    # in the finally block for graceful shutdown.
+    try:
+        from src.services.broker_auto_sync_service import start_auto_sync
+        start_auto_sync()
+    except Exception:  # noqa: BLE001 — defensive boot path
+        import logging
+        logging.getLogger(__name__).warning(
+            "[app] broker auto-sync startup failed (continuing without it)",
+            exc_info=True,
+        )
     try:
         yield
     finally:
+        try:
+            from src.services.broker_auto_sync_service import stop_auto_sync
+            stop_auto_sync(timeout=5.0)
+        except Exception:  # noqa: BLE001
+            pass
         if hasattr(app.state, "system_config_service"):
             delattr(app.state, "system_config_service")
 

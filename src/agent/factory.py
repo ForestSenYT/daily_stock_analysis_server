@@ -197,6 +197,21 @@ def get_tool_registry():
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("[AgentFactory] Broker tools unavailable: %s", exc)
 
+    # Trading framework — Phase A: register the emit-only
+    # ``propose_trade`` tool only when ``TRADING_MODE != 'disabled'``.
+    # The tool returns a structured intent dict and never calls
+    # ``TradingExecutionService.submit`` — submission is user-only in
+    # Phase A. Wrapped in try/except so any import error is non-fatal.
+    try:
+        from src.config import get_config as _get_config_for_trading  # noqa: WPS433
+        _trading_cfg = _get_config_for_trading()
+        if getattr(_trading_cfg, "trading_mode", "disabled") != "disabled":
+            from src.agent.tools.trading_tools import ALL_TRADING_TOOLS  # noqa: WPS433
+            for tool_fn in ALL_TRADING_TOOLS:
+                registry.register(tool_fn)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("[AgentFactory] Trading tools unavailable: %s", exc)
+
     _TOOL_REGISTRY = registry
     logger.info("[AgentFactory] ToolRegistry cached (%d tools)", len(registry._tools) if hasattr(registry, "_tools") else -1)
     return _TOOL_REGISTRY

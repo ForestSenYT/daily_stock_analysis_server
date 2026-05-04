@@ -6,6 +6,7 @@ import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
 import FirstradeSyncPanel from '../components/portfolio/FirstradeSyncPanel';
+import TradingExecutionPanel from '../components/portfolio/TradingExecutionPanel';
 import { toDateInputValue } from '../utils/format';
 import type {
   PortfolioAccountItem,
@@ -1179,6 +1180,10 @@ const PortfolioPage: React.FC = () => {
 
       <section className="grid grid-cols-1 gap-3">
         <FirstradeSyncPanel />
+      </section>
+
+      <section className="grid grid-cols-1 gap-3">
+        <TradingExecutionPanel />
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-3">

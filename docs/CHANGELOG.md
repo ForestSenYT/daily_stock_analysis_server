@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] Quant safe expression 增加常量类型、AST 节点数/深度、数值大小、幂指数、rolling window 与非负 shift/diff/pct_change 周期限制，防止未来函数和资源消耗型表达式。
 - [修复] `MARKET_REVIEW_REGION` 逗号子集在交易日过滤中按 open markets 求交集，保持 `cn,hk` 等配置语义一致。
 - [测试] 新增鉴权、Cloud Run 限流/OIDC、Quant safe expression/no-lookahead、交易日子集和 config category/schema 一致性回归测试。
+- [新功能] 自动化交易框架 Phase A（仅纸面）：`TRADING_MODE` 总开关（disabled/paper/live），`PaperExecutor` 用最近实时报价模拟成交，全部 6 项硬风险检查（参数/allowlist/市场时段/持仓上限/oversell/日内成交额）+ 1 项 broker 在线 info-only 标记，新增 `trade_executions` 审计表（一笔提交一行，UNIQUE request_uid 保证幂等），`portfolio_trades` 加 `source` 列把 paper 与真实交易物理隔离。`live` 模式抛 `NotImplementedError` 留 Phase B 解锁。
+- [新功能] 新端点 `POST /api/v1/trading/submit`、`POST /api/v1/trading/risk/preview`、`GET /api/v1/trading/status`、`GET /api/v1/trading/executions`，全部 503 当 `TRADING_MODE=disabled`。
+- [新功能] 新增 PortfolioPage 「交易执行」面板（`TradingExecutionPanel`），表单 + 风险预检 + 最近 10 笔审计列表；`disabled` 模式整面板隐藏。
+- [新功能] Agent 新增 `propose_trade` 工具（**emit-only**：返回 OrderRequest 形 dict，绝不调用提交端点；条件注册——`TRADING_MODE != disabled` 才入 ToolRegistry）。
+- [新功能] Firstrade 数据自动同步：`BROKER_FIRSTRADE_AUTO_SYNC_ENABLED=true` 时启动期拉后台 daemon 线程，每 N 分钟跑一次 `sync_now`；session 失效静默跳过；可配置 `BROKER_FIRSTRADE_AUTO_SYNC_INTERVAL_MINUTES`（1..1440）。
+- [测试] 新增 8 个 trading 测试文件 46 用例：types/risk_engine（14 项）/paper_executor/audit_repo/service/api/agent/invariant_guard，AST 不变量检查保证 `firstrade.order` 在 src/api 内零真实 import。
+- [文档] 新增 `docs/trading-framework.md`：架构 + 数据流 + Phase A vs B/C 边界 + 回滚策略。
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->

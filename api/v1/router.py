@@ -11,7 +11,7 @@ API v1 路由聚合
 
 from fastapi import APIRouter
 
-from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research, broker
+from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research, broker, trading
 
 # 创建 v1 版本主路由
 router = APIRouter(prefix="/api/v1")
@@ -95,4 +95,15 @@ router.include_router(
     broker.router,
     prefix="/broker",
     tags=["Broker"],
+)
+
+# Automated trading framework — Phase A: paper-only.
+# All endpoints honour ``TRADING_MODE`` (disabled / paper / live) and
+# return 503 when disabled. Live mode is a stub (raises
+# ``LIVE_NOT_IMPLEMENTED``); Phase B will unlock real execution in a
+# separate session with hard guardrails.
+router.include_router(
+    trading.router,
+    prefix="/trading",
+    tags=["Trading"],
 )

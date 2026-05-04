@@ -868,6 +868,14 @@ class Config:
     # 跨部署可关联的弱哈希盐。
     broker_account_hash_salt: str = ""
 
+    # Firstrade 数据自动同步：开启后服务进程在启动时拉起一个后台线程，
+    # 每 ``broker_firstrade_auto_sync_interval_minutes`` 分钟跑一次
+    # ``sync_now()``。会话失效 / 没登录时静默跳过，不抛错；登录后下一
+    # 个 tick 自动恢复同步。
+    # 推荐：交易日开盘 / 收盘附近频繁同步即可，默认 30 分钟。
+    broker_firstrade_auto_sync_enabled: bool = False
+    broker_firstrade_auto_sync_interval_minutes: int = 30
+
     # 把 Firstrade 实时快照桥接进 PortfolioPage 的「持仓管理」视图。
     # 开启后 ``/api/v1/portfolio/snapshot`` 会在原有手动账户后追加一个
     # 合成的 broker 账户（id 为负数，永不与真实 account_id 冲突），
@@ -880,6 +888,41 @@ class Config:
     # 影响 ``/api/v1/portfolio/snapshot`` 返回的 ``currency`` 字段以及内部
     # FX 转换的目标币种（每个账户的 base_currency 不变，仍各自独立）。
     portfolio_aggregate_currency: str = "USD"
+
+    # === 自动化交易框架（Phase A：仅纸面交易；live 暂未实现） ===
+    # ``trading_mode`` 是整个交易子系统的总开关：
+    #   - ``disabled``（默认）→ /api/v1/trading/* 全 503，WebUI 面板隐藏，
+    #     agent ``propose_trade`` 工具不注册。
+    #   - ``paper`` → ``PaperExecutor`` 上线：用最近行情模拟成交，
+    #     写入 ``portfolio_trades`` 时打标 ``source='paper'`` 与真实交易
+    #     物理隔离。
+    #   - ``live`` → 当前抛 ``NotImplementedError``，留给 Phase B 单独
+    #     session 解锁。
+    trading_mode: str = "disabled"
+    # 纸面成交滑点（基点）。MARKET BUY 用 ask×(1+bps/10000)，
+    # MARKET SELL 用 bid×(1-bps/10000)。default=5 = 0.05%。
+    trading_paper_slippage_bps: int = 5
+    # 纸面单笔手续费（绝对金额，与账户 base_currency 一致）；默认 0
+    # 模拟"零佣金 Firstrade"。如要 1bp 比例费率，先用代理实现再迭代。
+    trading_paper_fee_per_trade: float = 0.0
+    # 单笔最大持仓金额（按 quantity × 估价的绝对金额上限）。
+    # 默认 10000 USD —— 保守起步。RiskEngine 检查 BUY，SELL 不检查。
+    trading_max_position_value: float = 10000.0
+    # 单笔最大持仓占组合权益百分比（0..1）。默认 10%。
+    trading_max_position_pct: float = 0.10
+    # 单日总成交额上限（防止 runaway 策略）。
+    trading_max_daily_turnover: float = 50000.0
+    # 白名单 / 黑名单。空白名单 = 不限制；黑名单永远生效。
+    # 环境变量用逗号分隔："AAPL,MSFT,NVDA"。
+    trading_symbol_allowlist: List[str] = field(default_factory=list)
+    trading_symbol_denylist: List[str] = field(default_factory=list)
+    # 是否严格按交易时段拦截（False = 仅 INFO 标记，仍允许）。
+    trading_market_hours_strict: bool = True
+    # 每次成交是否走通知通道。
+    trading_notification_enabled: bool = True
+    # 纸面交易专用 PortfolioAccount.id（推荐单独建一个 paper 账户避免
+    # 混入真实持仓聚合）。空 = 使用 OrderRequest.account_id（必须）。
+    trading_paper_account_id: Optional[int] = None
 
     # === 输入校验加固（防 LLM 幻觉） ===
     # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
@@ -1602,12 +1645,61 @@ class Config:
                 os.getenv('BROKER_FIRSTRADE_MERGE_SUB_ACCOUNTS'), True,
             ),
             broker_account_hash_salt=(os.getenv('BROKER_ACCOUNT_HASH_SALT') or '').strip(),
+            broker_firstrade_auto_sync_enabled=parse_env_bool(
+                os.getenv('BROKER_FIRSTRADE_AUTO_SYNC_ENABLED'), False,
+            ),
+            broker_firstrade_auto_sync_interval_minutes=parse_env_int(
+                os.getenv('BROKER_FIRSTRADE_AUTO_SYNC_INTERVAL_MINUTES'), 30,
+                field_name='BROKER_FIRSTRADE_AUTO_SYNC_INTERVAL_MINUTES',
+                minimum=1, maximum=1440,
+            ),
             portfolio_include_broker_snapshots=parse_env_bool(
                 os.getenv('PORTFOLIO_INCLUDE_BROKER_SNAPSHOTS'), True,
             ),
             portfolio_aggregate_currency=(
                 os.getenv('PORTFOLIO_AGGREGATE_CURRENCY') or 'USD'
             ).strip().upper() or 'USD',
+            trading_mode=cls._resolve_trading_mode(os.getenv('TRADING_MODE')),
+            trading_paper_slippage_bps=parse_env_int(
+                os.getenv('TRADING_PAPER_SLIPPAGE_BPS'), 5,
+                field_name='TRADING_PAPER_SLIPPAGE_BPS',
+                minimum=0, maximum=1000,
+            ),
+            trading_paper_fee_per_trade=parse_env_float(
+                os.getenv('TRADING_PAPER_FEE_PER_TRADE'), 0.0,
+                field_name='TRADING_PAPER_FEE_PER_TRADE',
+                minimum=0.0,
+            ),
+            trading_max_position_value=parse_env_float(
+                os.getenv('TRADING_MAX_POSITION_VALUE'), 10000.0,
+                field_name='TRADING_MAX_POSITION_VALUE',
+                minimum=0.0,
+            ),
+            trading_max_position_pct=parse_env_float(
+                os.getenv('TRADING_MAX_POSITION_PCT'), 0.10,
+                field_name='TRADING_MAX_POSITION_PCT',
+                minimum=0.0, maximum=1.0,
+            ),
+            trading_max_daily_turnover=parse_env_float(
+                os.getenv('TRADING_MAX_DAILY_TURNOVER'), 50000.0,
+                field_name='TRADING_MAX_DAILY_TURNOVER',
+                minimum=0.0,
+            ),
+            trading_symbol_allowlist=cls._parse_csv_symbols(
+                os.getenv('TRADING_SYMBOL_ALLOWLIST'),
+            ),
+            trading_symbol_denylist=cls._parse_csv_symbols(
+                os.getenv('TRADING_SYMBOL_DENYLIST'),
+            ),
+            trading_market_hours_strict=parse_env_bool(
+                os.getenv('TRADING_MARKET_HOURS_STRICT'), True,
+            ),
+            trading_notification_enabled=parse_env_bool(
+                os.getenv('TRADING_NOTIFICATION_ENABLED'), True,
+            ),
+            trading_paper_account_id=cls._parse_optional_int(
+                os.getenv('TRADING_PAPER_ACCOUNT_ID'),
+            ),
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
@@ -1741,6 +1833,53 @@ class Config:
                 "weakly-hashed account identifiers."
             )
         return config
+
+    @classmethod
+    def _resolve_trading_mode(cls, raw: Optional[str]) -> str:
+        """Validate ``TRADING_MODE`` env. Anything outside the allowed
+        triple falls back to ``disabled`` with a warning so a typo
+        can't accidentally enable paper / live."""
+        normalized = (raw or "disabled").strip().lower()
+        if normalized in ("disabled", "paper", "live"):
+            return normalized
+        logger.warning(
+            "[config] Invalid TRADING_MODE=%r — must be disabled|paper|live. "
+            "Falling back to 'disabled'.",
+            raw,
+        )
+        return "disabled"
+
+    @staticmethod
+    def _parse_csv_symbols(raw: Optional[str]) -> List[str]:
+        """Comma-separated list of stock symbols → list[str], normalized
+        upper-case, blanks dropped. ``"AAPL, MSFT,, nvda"`` → ``["AAPL","MSFT","NVDA"]``."""
+        if not raw:
+            return []
+        out: List[str] = []
+        seen: set = set()
+        for part in str(raw).split(","):
+            sym = part.strip().upper()
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+        return out
+
+    @staticmethod
+    def _parse_optional_int(raw: Optional[str]) -> Optional[int]:
+        """Parse an env var that may be empty / absent / a real int.
+        Returns None when the env is absent or unparseable."""
+        if raw is None:
+            return None
+        raw = str(raw).strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[config] Could not parse %r as int; treating as None.", raw,
+            )
+            return None
 
     @classmethod
     def _parse_litellm_yaml(cls, config_path: str) -> List[Dict[str, Any]]:

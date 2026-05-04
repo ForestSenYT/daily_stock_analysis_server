@@ -173,6 +173,7 @@ class PortfolioService:
         trade_uid: Optional[str] = None,
         dedup_hash: Optional[str] = None,
         note: Optional[str] = None,
+        source: str = "manual",
     ) -> Dict[str, Any]:
         side_norm = (side or "").strip().lower()
         if side_norm not in VALID_SIDES:
@@ -222,6 +223,7 @@ class PortfolioService:
                     tax=float(tax),
                     note=(note or "").strip() or None,
                     dedup_hash=dedup_hash_norm,
+                    source=(source or "manual").strip().lower() or "manual",
                 )
                 return {"id": int(row.id)}
         except (DuplicateTradeUidError, DuplicateTradeDedupHashError) as exc:

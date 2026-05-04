@@ -436,6 +436,12 @@ class PortfolioTrade(Base):
     tax = Column(Float, default=0.0)
     note = Column(String(255))
     dedup_hash = Column(String(64), index=True)
+    # Provenance tag — segregates real trades from paper / imported /
+    # broker-synced. Allowed values: ``manual`` (default; existing
+    # rows back-fill to this), ``paper`` (PaperExecutor), ``live``
+    # (Phase B real execution), ``imported`` (CSV / cmd import),
+    # ``broker_sync`` (firstrade snapshot reflection).
+    source = Column(String(16), nullable=False, default='manual', index=True)
     created_at = Column(DateTime, default=datetime.now, index=True)
 
     __table_args__ = (
@@ -694,6 +700,60 @@ class BrokerSnapshot(Base):
             'snapshot_type', 'account_hash', 'as_of',
         ),
         Index('ix_broker_snapshot_broker_type_as_of', 'broker', 'snapshot_type', 'as_of'),
+    )
+
+
+class TradeExecution(Base):
+    """Trading framework Phase A audit row — one per OrderRequest.
+
+    Persisted *before* the risk engine runs (status='pending') and
+    updated once the executor returns. Failed / blocked rows stay in
+    the table so operators can audit the whole stream of attempts;
+    the WebUI's "recent executions" listing reads this table.
+
+    Mirrors :class:`BrokerSyncRun` in spirit (one row per attempt,
+    status discriminator, JSON payload columns) but is keyed on a
+    client-supplied UUID for idempotency rather than an
+    auto-incremented run id."""
+
+    __tablename__ = 'trade_executions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_uid = Column(String(64), nullable=False, unique=True, index=True)
+    mode = Column(String(16), nullable=False, index=True)        # paper | live
+    source = Column(String(16), nullable=False, default='ui')    # ui | agent | strategy
+    symbol = Column(String(16), nullable=False, index=True)
+    side = Column(String(8), nullable=False)                      # buy | sell
+    order_type = Column(String(16), nullable=False)               # market | limit
+    quantity = Column(Float, nullable=False)
+    limit_price = Column(Float, nullable=True)
+    account_id = Column(Integer, nullable=True, index=True)       # soft FK to portfolio_accounts.id
+    market = Column(String(8), nullable=True)
+    currency = Column(String(8), nullable=True)
+
+    status = Column(String(16), nullable=False, index=True)       # pending | filled | blocked | failed
+    risk_flags_json = Column(Text, nullable=True)                 # JSON list[RiskFlag]
+    risk_decision = Column(String(8), nullable=True)              # allow | block
+    fill_price = Column(Float, nullable=True)
+    fill_quantity = Column(Float, nullable=True)
+    realised_fee = Column(Float, nullable=False, default=0.0)
+    realised_tax = Column(Float, nullable=False, default=0.0)
+    portfolio_trade_id = Column(Integer, nullable=True, index=True)
+
+    request_payload_json = Column(Text, nullable=False)           # full OrderRequest.to_dict()
+    result_payload_json = Column(Text, nullable=True)             # full OrderResult.to_dict()
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(String(512), nullable=True)
+
+    agent_session_id = Column(String(100), nullable=True, index=True)
+    requested_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_trade_exec_mode_status_requested', 'mode', 'status', 'requested_at'),
+        Index('ix_trade_exec_account_requested', 'account_id', 'requested_at'),
+        Index('ix_trade_exec_symbol_requested', 'symbol', 'requested_at'),
     )
 
 

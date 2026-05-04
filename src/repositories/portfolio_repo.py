@@ -318,6 +318,7 @@ class PortfolioRepository:
         tax: float,
         note: Optional[str] = None,
         dedup_hash: Optional[str] = None,
+        source: str = "manual",
     ) -> PortfolioTrade:
         row = PortfolioTrade(
             account_id=account_id,
@@ -333,6 +334,7 @@ class PortfolioRepository:
             tax=tax,
             note=note,
             dedup_hash=dedup_hash,
+            source=source,
         )
         session.add(row)
         self._invalidate_account_cache_in_session(
