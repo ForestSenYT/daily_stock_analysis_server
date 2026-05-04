@@ -345,6 +345,7 @@ class StockAnalysisPipeline:
             trend_result: Optional[TrendAnalysisResult] = None
             historical_bars: Optional[List[Any]] = None  # hoisted for guard below
             quant_signals: Optional[Dict[str, Any]] = None  # hoisted for agent injection
+            quant_research_context: Optional[Dict[str, Any]] = None  # hoisted: cross-sectional rank vs market peer pool
             try:
                 from src.services.history_loader import get_frozen_target_date
                 _mkt = get_market_for_stock(normalize_stock_code(code))
@@ -378,6 +379,33 @@ class StockAnalysisPipeline:
                         logger.debug(
                             f"{stock_name}({code}) 量化因子快照计算失败 (跳过): {e}"
                         )
+                    # Cross-sectional context: rank this stock against the
+                    # market's baseline peer pool. Cached 24h per symbol.
+                    # Best-effort — failures are silent; main analysis
+                    # never blocks on this.
+                    if getattr(self.config, "quant_research_enabled", False):
+                        try:
+                            from src.services.cross_sectional_quant_service import (
+                                get_or_compute as _xsec_get_or_compute,
+                            )
+                            quant_research_context = _xsec_get_or_compute(
+                                code, _mkt, db=self.db, target_df=df,
+                            )
+                            if quant_research_context:
+                                pool_size = quant_research_context.get(
+                                    "pool_size_eligible", 0,
+                                )
+                                factor_count = len(
+                                    quant_research_context.get("factors") or [],
+                                )
+                                logger.info(
+                                    f"{stock_name}({code}) 横截面量化排名: "
+                                    f"{factor_count} 个因子 vs {pool_size} 只池内股"
+                                )
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug(
+                                f"{stock_name}({code}) 横截面量化排名计算失败 (跳过): {e}"
+                            )
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
 
@@ -416,6 +444,7 @@ class StockAnalysisPipeline:
                     fundamental_context,
                     trend_result,
                     quant_signals,
+                    quant_research_context,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -871,6 +900,7 @@ class StockAnalysisPipeline:
         fundamental_context: Optional[Dict[str, Any]] = None,
         trend_result: Optional[TrendAnalysisResult] = None,
         quant_signals: Optional[Dict[str, Any]] = None,
+        quant_research_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
@@ -899,6 +929,8 @@ class StockAnalysisPipeline:
                 initial_context["trend_result"] = self._safe_to_dict(trend_result)
             if quant_signals:
                 initial_context["quant_signals"] = quant_signals
+            if quant_research_context:
+                initial_context["quant_research_context"] = quant_research_context
 
             # Agent path: inject social sentiment as news_context so both
             # executor (_build_user_message) and orchestrator (ctx.set_data)

@@ -72,6 +72,19 @@ description). When present:
   fabricate IDs or values — if a factor isn't in the block, don't \
   reference it.
 
+## Cross-sectional rank (when provided)
+The user message may also include a ``[Cross-sectional quant rank]`` \
+JSON block showing how this stock RANKS within its market peer pool \
+on each builtin factor (``percentile`` 0..100, ``interpretation`` tags \
+the bullish / bearish read). When present:
+- Reference at least 1 percentile in your ``reasoning`` (e.g. ``"AAPL \
+  ranks 92nd percentile on rsi_14 — overbought relative to US peers"``).
+- A high percentile on a `negative`-direction factor (or low on a \
+  `positive`-direction factor) is a **bearish** signal vs peers; the \
+  opposite is bullish vs peers.
+- The pool size is small (~20). Treat ranks as "peer-relative \
+  context", not statistically rigorous quantiles.
+
 {baseline}
 {skills}
 ## Output Format
@@ -109,6 +122,21 @@ Return **only** a JSON object (no markdown fences):
                 "returns), and `description`. Cite at least 2 factor values "
                 "in your `reasoning`.]\n"
                 f"{json.dumps(quant_signals, ensure_ascii=False)}"
+            )
+        # Cross-sectional context: this stock's rank within the
+        # market peer pool. Lets the agent reason about peer-relative
+        # positioning ("AAPL ranks 92nd percentile on rsi_14") rather
+        # than just absolute factor values.
+        quant_rank = ctx.get_data("quant_research_context")
+        if quant_rank:
+            parts.append(
+                "\n[Cross-sectional quant rank — `percentile` is this "
+                "stock's rank (0..100) within a baseline peer pool of "
+                "~20 same-market stocks. `interpretation` tags whether "
+                "the rank reads bullish/bearish/mid given the factor's "
+                "expected direction. Reference at least 1 percentile in "
+                "your `reasoning`.]\n"
+                f"{json.dumps(quant_rank, ensure_ascii=False)}"
             )
         parts.append("Use your tools to fetch any missing data, then output the JSON opinion.")
         return "\n".join(parts)
