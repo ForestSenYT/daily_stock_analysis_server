@@ -198,22 +198,77 @@ def _percentile_rank(target_value: float, sample: List[float]) -> Optional[float
     return round(100.0 * rank / n, 1)
 
 
+_POOL_FETCH_LOCK = threading.Lock()
+# Module-level singleton so repeated /analyze calls share one fetcher
+# manager (avoids re-initialising every data source on every call).
+_FETCHER_MANAGER: Any = None
+
+
+def _get_fetcher_manager() -> Optional[Any]:
+    """Lazy-init the shared DataFetcherManager so the service is
+    importable in environments without data_provider deps installed
+    (e.g. unit tests with stub DBs)."""
+    global _FETCHER_MANAGER
+    if _FETCHER_MANAGER is not None:
+        return _FETCHER_MANAGER
+    with _POOL_FETCH_LOCK:
+        if _FETCHER_MANAGER is not None:
+            return _FETCHER_MANAGER
+        try:
+            from data_provider import DataFetcherManager
+            _FETCHER_MANAGER = DataFetcherManager()
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "[xsec_quant] DataFetcherManager unavailable; pool warm-up disabled (%s)",
+                exc,
+            )
+            _FETCHER_MANAGER = False  # sentinel: don't try again
+    return _FETCHER_MANAGER if _FETCHER_MANAGER else None
+
+
+def _warm_pool_member(sym: str, *, db: Any) -> bool:
+    """Best-effort: fetch ``sym``'s recent daily history via
+    DataFetcherManager and persist to the DB. Returns True on success."""
+    manager = _get_fetcher_manager()
+    if manager is None:
+        return False
+    try:
+        df, source_name = manager.get_daily_data(sym, days=90)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[xsec_quant] pool member %s fetch failed: %s", sym, exc)
+        return False
+    if df is None or len(df) == 0:
+        logger.debug("[xsec_quant] pool member %s fetch returned empty", sym)
+        return False
+    try:
+        db.save_daily_data(df, sym, source_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[xsec_quant] pool member %s save failed: %s", sym, exc)
+        return False
+    return True
+
+
 def _load_pool_history(
     pool: Tuple[str, ...],
     *,
     end_date: date,
     db: Any,
+    fetch_missing: bool = True,
 ) -> Dict[str, "Any"]:
     """Pull the most recent ~60 trading days of OHLCV for each pool
     member from the local DB. Returns ``{symbol: pd.DataFrame}``.
 
-    Skips members whose history is missing or shorter than 30 rows
-    (the same warm-up minimum quant_signals_service applies).
+    When ``fetch_missing`` is True (default), members not in the DB
+    (or shorter than 30 rows) are fetched via the shared
+    ``DataFetcherManager`` and persisted before re-reading. This makes
+    the first call of the day eat the warm-up cost; subsequent calls
+    hit the in-process 24h cache.
     """
     import pandas as pd
 
     start_date = end_date - timedelta(days=89)
     out: Dict[str, "Any"] = {}
+    fetched_count = 0
     for sym in pool:
         try:
             bars = db.get_data_range(sym, start_date, end_date)
@@ -223,6 +278,18 @@ def _load_pool_history(
                 sym, exc,
             )
             continue
+
+        if (not bars or len(bars) < 30) and fetch_missing:
+            # Warm the DB cache via DataFetcherManager. Best-effort —
+            # silent failure means this member just won't participate
+            # in the rank.
+            if _warm_pool_member(sym, db=db):
+                fetched_count += 1
+                try:
+                    bars = db.get_data_range(sym, start_date, end_date)
+                except Exception:  # noqa: BLE001
+                    bars = None
+
         if not bars or len(bars) < 30:
             continue
         try:
@@ -236,6 +303,12 @@ def _load_pool_history(
                 sym, exc,
             )
             continue
+
+    if fetched_count:
+        logger.info(
+            "[xsec_quant] warmed %d pool members from data sources",
+            fetched_count,
+        )
     return out
 
 
