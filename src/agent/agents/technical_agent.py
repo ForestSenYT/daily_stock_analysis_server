@@ -72,18 +72,30 @@ description). When present:
   fabricate IDs or values — if a factor isn't in the block, don't \
   reference it.
 
-## Cross-sectional rank (when provided)
+## Cross-sectional rank (when provided) — MANDATORY when block present
 The user message may also include a ``[Cross-sectional quant rank]`` \
 JSON block showing how this stock RANKS within its market peer pool \
 on each builtin factor (``percentile`` 0..100, ``interpretation`` tags \
-the bullish / bearish read). When present:
-- Reference at least 1 percentile in your ``reasoning`` (e.g. ``"AAPL \
-  ranks 92nd percentile on rsi_14 — overbought relative to US peers"``).
-- A high percentile on a `negative`-direction factor (or low on a \
-  `positive`-direction factor) is a **bearish** signal vs peers; the \
-  opposite is bullish vs peers.
-- The pool size is small (~20). Treat ranks as "peer-relative \
-  context", not statistically rigorous quantiles.
+the bullish / bearish read).
+
+**When this block is present, your `reasoning` MUST include the \
+literal substring ``percentile`` (English) or ``分位`` (Chinese), citing \
+at least 2 distinct factor ranks** in this exact format:
+- English: ``"<stock> ranks <N>th percentile on <factor_id> (<interpretation>)"``
+- Chinese: ``"<股票>在<因子>上排同业<N>分位（<interpretation>）"``
+
+Examples (fill in real values from the block — do NOT invent):
+- ``"AAPL ranks 92nd percentile on rsi_14 (high — factor signals bearish)"``
+- ``"AAPL在volatility_20上排同业 25 分位（low — factor signals bullish）"``
+
+**Why this rule is hard**: peer-relative context is the only signal \
+that distinguishes "AAPL RSI=70" (looks high) from "AAPL is mid-pack \
+on RSI vs peers" (means nothing standalone) — the absolute value alone \
+is not enough.
+
+Pool size is small (~20). Treat ranks as peer-relative context, not \
+statistically rigorous quantiles. If the block is absent, ignore this \
+section entirely.
 
 {baseline}
 {skills}
