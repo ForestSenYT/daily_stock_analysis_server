@@ -115,6 +115,26 @@ class FirstradeSyncService:
     # Status & gate checks
     # ------------------------------------------------------------------
 
+    def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Best-effort real-time quote via the user's Firstrade session.
+
+        Used by the analyse pipeline as a priority real-time source for
+        US stocks (covers pre-market / after-hours that yfinance misses).
+        Returns ``None`` when the feature is off, the SDK is missing,
+        the user isn't logged in, or the vendor request fails — the
+        caller falls through to the existing data-provider chain.
+        """
+        if not self._is_enabled():
+            return None
+        try:
+            return self._client.get_quote(symbol)
+        except Exception as exc:  # noqa: BLE001 — defence
+            logger.info(
+                "[firstrade_sync_service] get_quote(%s) raised: %s",
+                symbol, exc,
+            )
+            return None
+
     def get_status(self) -> Dict[str, Any]:
         if not self._is_enabled():
             return {

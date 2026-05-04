@@ -570,6 +570,96 @@ class FirstradeReadOnlyClient:
         return results
 
     # ------------------------------------------------------------------
+    # Quote (read-only, used as a real-time source for the analyser)
+    # ------------------------------------------------------------------
+    #
+    # ``firstrade.symbols.SymbolQuote`` is the only addition to the
+    # vendor-import surface beyond ``account``. It is **read-only**:
+    # it issues a GET to a quote URL and parses the JSON response.
+    # No order-placement code path is touched. The trading-disabled
+    # invariant the rest of this module enforces is preserved — see
+    # the audit grep in CI (no place_order / cancel_order / option
+    # symbols anywhere in the code that imports this module).
+
+    def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch a real-time quote for ``symbol`` via the user's
+        Firstrade session.
+
+        Returns a normalised dict with ``last``, ``bid``, ``ask``,
+        ``change``, ``open``, ``high``, ``low``, ``volume``,
+        ``today_close``, ``quote_time``, ``last_trade_time``,
+        ``realtime``, ``company_name``, ``exchange``, plus a
+        ``source="firstrade"`` marker for upstream provenance.
+
+        Returns ``None`` (best-effort) when:
+          * feature flag disabled,
+          * SDK not installed,
+          * not logged in (no FTSession or no account list),
+          * vendor request fails (rate-limited, 401, network).
+        Upstream callers fall through to other data sources on None.
+        """
+        if not self.is_enabled():
+            return None
+        sdk = self._require_logged_in()
+        if sdk is None:
+            return None
+        # Need a non-empty account number to scope the request.
+        with self._lock:
+            real_account = next(iter(self._account_map.values()), None)
+        if not real_account:
+            # Refresh the account map (idempotent).
+            try:
+                self.list_accounts()
+            except Exception:  # noqa: BLE001
+                return None
+            with self._lock:
+                real_account = next(iter(self._account_map.values()), None)
+            if not real_account:
+                return None
+
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        try:
+            from firstrade import symbols as _symbols  # noqa: WPS433
+        except ImportError as exc:
+            logger.info(
+                "[firstrade] symbols module unavailable, get_quote skipped: %s",
+                exc,
+            )
+            return None
+
+        try:
+            quote = _symbols.SymbolQuote(
+                ft_session=sdk.session, account=real_account, symbol=sym,
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary
+            logger.info(
+                "[firstrade] get_quote(%s) failed: %s",
+                sym, _sanitize_exception(exc),
+            )
+            return None
+
+        return {
+            "source": "firstrade",
+            "symbol": sym,
+            "last": _to_float(getattr(quote, "last", None)),
+            "bid": _to_float(getattr(quote, "bid", None)),
+            "ask": _to_float(getattr(quote, "ask", None)),
+            "change": _to_float(getattr(quote, "change", None)),
+            "open": _to_float(getattr(quote, "open", None)),
+            "high": _to_float(getattr(quote, "high", None)),
+            "low": _to_float(getattr(quote, "low", None)),
+            "today_close": _to_float(getattr(quote, "today_close", None)),
+            "volume": _to_float(getattr(quote, "volume", None)),
+            "quote_time": getattr(quote, "quote_time", None),
+            "last_trade_time": getattr(quote, "last_trade_time", None),
+            "realtime": getattr(quote, "realtime", None),
+            "company_name": getattr(quote, "company_name", None),
+            "exchange": getattr(quote, "exchange", None),
+        }
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 

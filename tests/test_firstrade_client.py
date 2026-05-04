@@ -175,9 +175,46 @@ def _install_fake_sdk(*, need_code: bool = False, accounts=None,
     return fake_account_mod, FTSession, FTAccountData
 
 
+def _install_fake_symbols(*, last=None, raise_exc=None):
+    """Install a fake ``firstrade.symbols`` module that returns a
+    deterministic SymbolQuote-shaped object (or raises).
+    Must be called AFTER _install_fake_sdk so ``firstrade`` already
+    exists in sys.modules."""
+    fake_symbols_mod = types.ModuleType("firstrade.symbols")
+
+    class _StubQuote:
+        def __init__(self, ft_session, account, symbol):
+            if raise_exc is not None:
+                raise raise_exc
+            self.symbol = symbol
+            self.last = last
+            self.bid = 0.0
+            self.ask = 0.0
+            self.change = 0.5
+            self.open = 100.0
+            self.high = 105.0
+            self.low = 99.0
+            self.today_close = 100.5
+            self.volume = "1000000"
+            self.quote_time = "10:00:00"
+            self.last_trade_time = "10:00:00"
+            self.realtime = "yes"
+            self.company_name = "Apple Inc"
+            self.exchange = "NASDAQ"
+
+    fake_symbols_mod.SymbolQuote = _StubQuote  # type: ignore[attr-defined]
+    sys.modules["firstrade.symbols"] = fake_symbols_mod
+    # Also make ``firstrade.symbols`` importable via the parent.
+    parent = sys.modules.get("firstrade")
+    if parent is not None:
+        parent.symbols = fake_symbols_mod  # type: ignore[attr-defined]
+    return fake_symbols_mod
+
+
 def _uninstall_fake_sdk():
     sys.modules.pop("firstrade", None)
     sys.modules.pop("firstrade.account", None)
+    sys.modules.pop("firstrade.symbols", None)
 
 
 # =====================================================================
@@ -635,6 +672,69 @@ class ImportSafetyTests(unittest.TestCase):
         # side effect of reloading our client.
         self.assertNotIn("firstrade", sys.modules)
         self.assertNotIn("firstrade.order", sys.modules)
+
+
+class GetQuoteTests(unittest.TestCase):
+    """Verify :meth:`FirstradeReadOnlyClient.get_quote` is best-effort,
+    parses the vendor SymbolQuote into a normalised dict, and returns
+    None on every kind of failure (so the analyse pipeline can fall
+    through to other data sources without breaking).
+    """
+
+    def setUp(self) -> None:
+        self.config = _make_config()
+
+    def tearDown(self) -> None:
+        _uninstall_fake_sdk()
+
+    def test_disabled_returns_none(self) -> None:
+        client = FirstradeReadOnlyClient(_make_config(enabled=False))
+        self.assertIsNone(client.get_quote("AAPL"))
+
+    def test_not_logged_in_returns_none(self) -> None:
+        _install_fake_sdk()
+        client = FirstradeReadOnlyClient(self.config)
+        self.assertIsNone(client.get_quote("AAPL"))
+
+    def test_happy_path_returns_normalised_quote(self) -> None:
+        _install_fake_sdk()
+        _install_fake_symbols(last=104.72)
+        client = FirstradeReadOnlyClient(self.config)
+        client.login()
+        quote = client.get_quote("AAPL")
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote["symbol"], "AAPL")
+        self.assertEqual(quote["last"], 104.72)
+        self.assertEqual(quote["source"], "firstrade")
+        # Numeric coercion happened — these arrived as int / str / float
+        # and should all be float on the way out.
+        self.assertIsInstance(quote["volume"], float)
+        # Metadata fields preserved.
+        self.assertEqual(quote["realtime"], "yes")
+        self.assertEqual(quote["company_name"], "Apple Inc")
+
+    def test_vendor_exception_returns_none(self) -> None:
+        _install_fake_sdk()
+        _install_fake_symbols(raise_exc=RuntimeError("rate limited"))
+        client = FirstradeReadOnlyClient(self.config)
+        client.login()
+        # Should NOT raise — must degrade silently to None.
+        self.assertIsNone(client.get_quote("AAPL"))
+
+    def test_empty_symbol_returns_none(self) -> None:
+        _install_fake_sdk()
+        _install_fake_symbols(last=100.0)
+        client = FirstradeReadOnlyClient(self.config)
+        client.login()
+        self.assertIsNone(client.get_quote(""))
+
+    def test_symbols_module_missing_returns_none(self) -> None:
+        # Install fake account SDK but DON'T install symbols module.
+        _install_fake_sdk()
+        client = FirstradeReadOnlyClient(self.config)
+        client.login()
+        # Should ImportError-fallback cleanly to None.
+        self.assertIsNone(client.get_quote("AAPL"))
 
 
 if __name__ == "__main__":

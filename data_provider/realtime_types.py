@@ -102,6 +102,7 @@ class RealtimeSource(Enum):
     SINA = "sina"                   # 新浪直连
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
+    FIRSTRADE = "firstrade"         # 用户自己的 Firstrade 账户（含 pre/post market 实时报价）
     FALLBACK = "fallback"           # 降级兜底
 
 

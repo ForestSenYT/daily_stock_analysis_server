@@ -262,7 +262,19 @@ class StockAnalysisPipeline:
             realtime_quote = None
             try:
                 if self.config.enable_realtime_quote:
-                    realtime_quote = self.fetcher_manager.get_realtime_quote(code, log_final_failure=False)
+                    # ----- Firstrade priority for US stocks -----
+                    # Yahoo / akshare miss pre-market / after-hours ticks.
+                    # If the user has a live Firstrade session, prefer
+                    # its quote (covers extended-hours). Best-effort —
+                    # any failure (not logged in, SDK missing, vendor
+                    # rate limit, network) silently falls through to
+                    # the standard data-provider chain.
+                    if is_us_stock_code(code):
+                        firstrade_q = self._try_firstrade_quote(code)
+                        if firstrade_q is not None:
+                            realtime_quote = firstrade_q
+                    if realtime_quote is None:
+                        realtime_quote = self.fetcher_manager.get_realtime_quote(code, log_final_failure=False)
                     if realtime_quote:
                         # 使用实时行情返回的真实股票名称
                         if realtime_quote.name:
@@ -868,6 +880,70 @@ class StockAnalysisPipeline:
 
         enriched_context["belong_boards"] = boards
         return enriched_context
+
+    def _try_firstrade_quote(self, code: str):
+        """Best-effort: get a real-time quote via the user's Firstrade
+        session and adapt it into a ``UnifiedRealtimeQuote``.
+
+        Returns ``None`` if Firstrade is not enabled, not logged in,
+        the symbols module is missing, or the vendor request fails —
+        the caller then falls through to the existing fetcher chain.
+
+        Why this matters: yfinance only returns the last regular-
+        session price and silently lags pre-market / after-hours.
+        Firstrade's quote feed includes extended-hours ticks.
+        """
+        try:
+            from src.services.firstrade_sync_service import (
+                get_firstrade_sync_service,
+            )
+            service = get_firstrade_sync_service()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[firstrade-quote] service unavailable: %s", exc)
+            return None
+        try:
+            quote_dict = service.get_quote(code)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[firstrade-quote] get_quote raised: %s", exc)
+            return None
+        if not quote_dict:
+            return None
+        last = quote_dict.get("last")
+        if last is None:
+            return None  # without a price, the report can't proceed
+        # Adapt to UnifiedRealtimeQuote so downstream code is unchanged.
+        from data_provider.realtime_types import (
+            RealtimeSource,
+            UnifiedRealtimeQuote,
+        )
+        prev_close = quote_dict.get("today_close")
+        change = quote_dict.get("change")
+        change_pct = None
+        if change is not None and prev_close not in (None, 0):
+            try:
+                change_pct = round(100.0 * float(change) / float(prev_close), 4)
+            except Exception:  # noqa: BLE001
+                change_pct = None
+        unified = UnifiedRealtimeQuote(
+            code=code,
+            name=quote_dict.get("company_name") or "",
+            source=RealtimeSource.FIRSTRADE,
+            price=float(last),
+            change_pct=change_pct,
+            change_amount=change,
+            volume=quote_dict.get("volume"),
+            open_price=quote_dict.get("open"),
+            high=quote_dict.get("high"),
+            low=quote_dict.get("low"),
+            pre_close=prev_close,
+        )
+        logger.info(
+            "[firstrade-quote] %s last=%s (extended-hours covered, "
+            "realtime=%s, quote_time=%s)",
+            code, last, quote_dict.get("realtime"),
+            quote_dict.get("quote_time"),
+        )
+        return unified
 
     def _ensure_agent_history(self, code: str, min_days: int = 240) -> None:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""
