@@ -347,6 +347,52 @@ class BrokerRepoWindowingTests(unittest.TestCase):
         )
         self.repo.save_accounts([acct])
 
+    def test_repeat_syncs_within_window_dedupe_by_symbol(self) -> None:
+        """Three consecutive syncs writing the same 3 positions must
+        surface as 3 rows in ``get_latest_positions``, not 9. Dedup
+        key is ``(account_hash, symbol)``; freshest wins."""
+        from src.brokers.base import BrokerPosition
+
+        # All three syncs target the same hash + same symbols, just
+        # slightly different prices and as_of timestamps.
+        for sync_idx, ts_iso in enumerate([
+            "2026-05-04T10:00:00+00:00",
+            "2026-05-04T10:01:00+00:00",
+            "2026-05-04T10:02:00+00:00",
+        ]):
+            for sym, price in (("AAPL", 280.0 + sync_idx),
+                                ("AVGO", 420.0 + sync_idx),
+                                ("QQQM", 277.0 + sync_idx)):
+                p = BrokerPosition(
+                    broker="firstrade",
+                    account_hash="abcdef0123456789",
+                    account_last4="4947",
+                    account_alias="Firstrade ****4947",
+                    symbol=sym,
+                    quantity=10.0,
+                    market_value=price * 10,
+                    avg_cost=200.0,
+                    last_price=price,
+                    unrealized_pnl=0.0,
+                    day_change=0.0,
+                    day_change_pct=0.0,
+                    currency="USD",
+                    as_of=ts_iso,
+                    raw_payload={},
+                )
+                self.repo.save_positions([p])
+
+        latest = self.repo.get_latest_positions()
+        # Must be exactly 3, not 9.
+        self.assertEqual(len(latest), 3)
+        symbols = sorted(r["symbol"] for r in latest)
+        self.assertEqual(symbols, ["AAPL", "AVGO", "QQQM"])
+        # Each should be the freshest sync (sync_idx=2).
+        for row in latest:
+            self.assertEqual(row["payload"]["last_price"], {
+                "AAPL": 282.0, "AVGO": 422.0, "QQQM": 279.0,
+            }[row["symbol"]])
+
     def test_legacy_buggy_rows_excluded_by_time_window(self) -> None:
         # Five fake accounts from an earlier buggy sync, two hours ago.
         for i, last4 in enumerate(["0001", "0002", "0003", "0004", "0005"]):

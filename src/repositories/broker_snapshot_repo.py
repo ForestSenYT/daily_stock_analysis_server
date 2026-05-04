@@ -390,13 +390,27 @@ class BrokerSnapshotRepository:
         account_hash: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Return the rows from the most-recent sync only.
+        """Return the rows from the most-recent sync only, with
+        per-entity deduplication so multiple consecutive syncs don't
+        produce duplicate position / order / transaction rows in the
+        snapshot view.
+
+        De-dup key by ``snapshot_type``:
+          * ``position``     → ``(account_hash, symbol)``
+          * ``order``        → ``(account_hash, entity_hash)``  (order id)
+          * ``transaction``  → ``(account_hash, entity_hash)``  (tx id)
+          * ``balance``      → ``(account_hash,)``  (one balance per account)
+          * fallback         → ``(account_hash, symbol or entity_hash)``
+
+        Rows are pre-sorted ``as_of DESC, id DESC`` so the first
+        occurrence of each key is the freshest one — subsequent
+        occurrences (older syncs of the same entity) are dropped.
 
         We can't trust a fixed time window because syncs are manually
         triggered, but each sync writes ALL rows with very close
-        ``as_of`` timestamps — so we pick the freshest ``as_of`` per
-        ``account_hash`` and return all rows of that type whose
-        ``as_of`` falls within a 5-minute fence.
+        ``as_of`` timestamps — so we pick the freshest ``as_of`` and
+        return all rows of that type whose ``as_of`` falls within a
+        5-minute fence (then dedupe).
         """
         with self.db.get_session() as session:
             stmt = (
@@ -418,10 +432,27 @@ class BrokerSnapshotRepository:
         # 5-minute fence — generous enough for one full sync_now() to
         # span without picking up a previous run's stragglers.
         cutoff = latest_ts - _five_minutes()
+
+        def _dedup_key(row) -> tuple:
+            ah = row.account_hash or ""
+            if snapshot_type == "balance":
+                return (ah,)
+            if snapshot_type == "position":
+                return (ah, (row.symbol or "").upper())
+            if snapshot_type in ("order", "transaction"):
+                return (ah, row.entity_hash or "")
+            # Fallback: best-effort composite key.
+            return (ah, (row.symbol or row.entity_hash or "").upper())
+
+        seen_keys: set = set()
         out: List[Dict[str, Any]] = []
         for row in rows:
             if row.as_of < cutoff:
                 break
+            key = _dedup_key(row)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             out.append(self._row_to_dict(row))
             if limit and len(out) >= limit:
                 break
