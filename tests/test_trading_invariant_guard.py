@@ -20,7 +20,7 @@ import ast
 import re
 import unittest
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 
 # Files allowed to mention forbidden tokens (only this guard test +
@@ -46,6 +46,27 @@ def _project_files() -> List[Path]:
     for sub in ("src", "api"):
         out.extend(_walk_python_files(Path(sub)))
     return out
+
+
+def _constant_string(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _dynamic_import_target(node: ast.Call) -> Optional[str]:
+    if not node.args:
+        return None
+    func = node.func
+    is_import_module = (
+        isinstance(func, ast.Attribute)
+        and func.attr == "import_module"
+        or isinstance(func, ast.Name)
+        and func.id in {"import_module", "__import__"}
+    )
+    if not is_import_module:
+        return None
+    return _constant_string(node.args[0])
 
 
 class InvariantGuardTests(unittest.TestCase):
@@ -75,6 +96,10 @@ class InvariantGuardTests(unittest.TestCase):
                     for alias in node.names:
                         if alias.name in forbidden_modules:
                             offenders.append(f"{rel}:{node.lineno} import {alias.name}")
+                elif isinstance(node, ast.Call):
+                    target = _dynamic_import_target(node)
+                    if target in forbidden_modules:
+                        offenders.append(f"{rel}:{node.lineno} dynamic import {target}")
         self.assertEqual(
             offenders, [],
             msg="Read-only invariant violated:\n" + "\n".join(offenders),

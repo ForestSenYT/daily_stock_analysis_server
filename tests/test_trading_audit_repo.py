@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+
+from sqlalchemy.exc import IntegrityError
 
 from src.storage import DatabaseManager
 from src.trading.audit_repo import (
@@ -71,6 +74,37 @@ class AuditRepoTests(unittest.TestCase):
         self.repo.start_execution(req, mode="paper")
         with self.assertRaises(DuplicateRequestUidError):
             self.repo.start_execution(req, mode="paper")
+
+    def test_commit_integrity_error_maps_to_duplicate_request_uid(self) -> None:
+        class FakeSession:
+            rolled_back = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, *_args, **_kwargs):
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+            def add(self, _row):
+                pass
+
+            def commit(self):
+                raise IntegrityError("insert", {}, RuntimeError("duplicate"))
+
+            def rollback(self):
+                self.rolled_back = True
+
+        session = FakeSession()
+        fake_db = SimpleNamespace(get_session=lambda: session)
+        repo = TradeExecutionRepository(db_manager=fake_db)
+
+        with self.assertRaises(DuplicateRequestUidError):
+            repo.start_execution(_req(uid="race-uid-1"), mode="paper")
+
+        self.assertTrue(session.rolled_back)
 
     def test_recent_executions_filters_by_mode_and_orders_by_requested_at_desc(self) -> None:
         # Three rows, two paper + one live (live just to test mode filter)

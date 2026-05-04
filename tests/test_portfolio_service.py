@@ -672,6 +672,43 @@ class PortfolioServiceTestCase(unittest.TestCase):
                     with repo.portfolio_write_session():
                         pass
 
+    def test_portfolio_write_session_skips_begin_immediate_for_non_sqlite(self) -> None:
+        class FakeSession:
+            committed = False
+            closed = False
+            connection_called = False
+
+            def connection(self):
+                self.connection_called = True
+                raise AssertionError("Postgres sessions must not issue BEGIN IMMEDIATE")
+
+            def commit(self):
+                self.committed = True
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        session = FakeSession()
+        fake_db = type(
+            "FakeDb",
+            (),
+            {
+                "_is_sqlite_engine": False,
+                "get_session": lambda self: session,
+            },
+        )()
+        repo = PortfolioRepository(db_manager=fake_db)
+
+        with repo.portfolio_write_session() as active_session:
+            self.assertIs(active_session, session)
+
+        self.assertFalse(session.connection_called)
+        self.assertTrue(session.committed)
+        self.assertTrue(session.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

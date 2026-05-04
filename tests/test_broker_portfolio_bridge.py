@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
@@ -331,9 +332,14 @@ class BrokerRepoWindowingTests(unittest.TestCase):
         from src.storage import DatabaseManager
 
         # Inject an in-memory sqlite manager so the test is hermetic.
+        DatabaseManager.reset_instance()
         self.db = DatabaseManager(db_url="sqlite:///:memory:")
         self.repo = BrokerSnapshotRepository(db_manager=self.db)
         self._BrokerAccount = BrokerAccount
+        self._DatabaseManager = DatabaseManager
+
+    def tearDown(self) -> None:
+        self._DatabaseManager.reset_instance()
 
     def _save_account(self, *, account_hash: str, account_last4: str,
                       as_of_iso: str) -> None:
@@ -412,6 +418,40 @@ class BrokerRepoWindowingTests(unittest.TestCase):
         latest = self.repo.get_latest_accounts()
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0]["account_last4"], "4947")
+
+    def test_save_full_snapshot_rolls_back_all_legs_on_failure(self) -> None:
+        acct = self._BrokerAccount(
+            broker="firstrade",
+            account_hash="abcdef0123456789",
+            account_last4="4947",
+            account_alias="Firstrade ****4947",
+            as_of="2026-05-04T02:30:00+00:00",
+            raw_payload={},
+        )
+        snapshot = SimpleNamespace(
+            broker="firstrade",
+            accounts=[acct],
+            balances=[object()],
+            positions=[],
+            orders=[],
+            transactions=[],
+        )
+        original_insert = self.repo._insert_rows_in_session
+
+        def fail_on_balance(session, snapshot_type, rows, broker):
+            if snapshot_type == "balance":
+                raise RuntimeError("balance insert failed")
+            return original_insert(session, snapshot_type, rows, broker)
+
+        with patch.object(
+            self.repo,
+            "_insert_rows_in_session",
+            side_effect=fail_on_balance,
+        ):
+            with self.assertRaises(RuntimeError):
+                self.repo.save_full_snapshot(snapshot)
+
+        self.assertEqual(self.repo.get_latest_accounts(), [])
 
 
 if __name__ == "__main__":

@@ -77,11 +77,32 @@ _NUMERIC_WHITELIST = frozenset({
     "order_quantity", "market_value", "avg_cost", "last_price",
     "unrealized_pnl", "buying_power", "total_value", "cash",
     "account_count", "balance_count", "position_count", "order_count",
-    "transaction_count", "id", "limit", "started_at", "finished_at",
+    "transaction_count", "limit", "started_at", "finished_at",
     "as_of", "trade_date", "settle_date", "created_at",
 })
 
 _DIGIT_RUN_RE = re.compile(r"\b\d{8,}\b")
+_SENSITIVE_IDENTIFIER_KEYS = frozenset({
+    "id",
+    "order_id",
+    "orderid",
+    "order_no",
+    "orderno",
+    "order_number",
+    "ordernumber",
+    "transaction_id",
+    "transactionid",
+    "history_id",
+    "historyid",
+    "trade_id",
+    "tradeid",
+})
+
+
+def _normalise_key(key: Any) -> str:
+    if not isinstance(key, str):
+        return ""
+    return key.strip().lower().replace("-", "_")
 
 
 def _scrub_value(key: Any, value: Any) -> Any:
@@ -96,7 +117,12 @@ def _scrub_value(key: Any, value: Any) -> Any:
         # Skip whitelisted numeric fields. ``last4`` is intentionally
         # 4 digits so the regex never matches; we still allow it
         # explicitly.
-        normalized_key = str(key).strip().lower() if isinstance(key, str) else ""
+        if value == "***REDACTED***":
+            return value
+        normalized_key = _normalise_key(key)
+        canonical_key = "".join(ch for ch in normalized_key if ch.isalnum())
+        if normalized_key in _SENSITIVE_IDENTIFIER_KEYS or canonical_key in _SENSITIVE_IDENTIFIER_KEYS:
+            return "***"
         if normalized_key in _NUMERIC_WHITELIST or normalized_key.endswith("_id_hash"):
             return value
         return _DIGIT_RUN_RE.sub("***", value)

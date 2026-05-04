@@ -15,9 +15,17 @@ from sqlalchemy.sql import func
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.config import Config
-from src.storage import DatabaseManager, StockDaily
+from src.storage import DatabaseManager, StockDaily, _safe_db_url_for_log
 
 class TestStorage(unittest.TestCase):
+    def test_safe_db_url_for_log_redacts_password(self):
+        rendered = _safe_db_url_for_log(
+            "postgresql+psycopg2://user:super-secret@db.example.com:5432/dsa"
+        )
+
+        self.assertNotIn("super-secret", rendered)
+        self.assertIn("***", rendered)
+
     
     def test_parse_sniper_value(self):
         """测试解析狙击点位数值"""
@@ -209,8 +217,8 @@ class TestStorage(unittest.TestCase):
 
             self.assertEqual(total, 1)
         finally:
-            temp_dir.cleanup()
             DatabaseManager.reset_instance()
+            temp_dir.cleanup()
 
 if __name__ == '__main__':
     unittest.main()

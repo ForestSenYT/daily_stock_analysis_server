@@ -136,13 +136,15 @@ class PortfolioRepository:
     @contextmanager
     def portfolio_write_session(self):
         session = self.db.get_session()
-        try:
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        except OperationalError as exc:
-            session.close()
-            if self._is_sqlite_locked_error(exc):
-                raise PortfolioBusyError("Portfolio ledger is busy; please retry shortly.") from exc
-            raise
+        is_sqlite = bool(getattr(self.db, "_is_sqlite_engine", False))
+        if is_sqlite:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            except OperationalError as exc:
+                session.close()
+                if self._is_sqlite_locked_error(exc):
+                    raise PortfolioBusyError("Portfolio ledger is busy; please retry shortly.") from exc
+                raise
 
         try:
             yield session

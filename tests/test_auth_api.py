@@ -309,7 +309,86 @@ class AuthApiTestCase(unittest.TestCase):
         middleware = AuthMiddleware(app=MagicMock())
         call_next = AsyncMock(return_value=Response(status_code=200))
 
-        with patch("api.middlewares.auth.is_auth_enabled", return_value=False):
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
+             patch.dict(
+                 os.environ,
+                 {"K_SERVICE": "", "K_REVISION": "", "K_CONFIGURATION": ""},
+             ):
+            response = asyncio.run(middleware.dispatch(request, call_next))
+
+        self.assertEqual(response.status_code, 401)
+        call_next.assert_not_awaited()
+
+    def test_sensitive_api_requires_auth_for_remote_client_when_auth_disabled(self) -> None:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/trading/submit",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("203.0.113.10", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        request = Request(scope)
+        middleware = AuthMiddleware(app=MagicMock())
+        call_next = AsyncMock(return_value=Response(status_code=200))
+
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
+             patch.dict(
+                 os.environ,
+                 {"K_SERVICE": "", "K_REVISION": "", "K_CONFIGURATION": ""},
+             ):
+            response = asyncio.run(middleware.dispatch(request, call_next))
+
+        self.assertEqual(response.status_code, 401)
+        call_next.assert_not_awaited()
+
+    def test_sensitive_api_allows_loopback_client_when_auth_disabled(self) -> None:
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/system/config",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        request = Request(scope)
+        middleware = AuthMiddleware(app=MagicMock())
+        call_next = AsyncMock(return_value=Response(status_code=200))
+
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
+             patch.dict(
+                 os.environ,
+                 {"K_SERVICE": "", "K_REVISION": "", "K_CONFIGURATION": ""},
+             ):
+            response = asyncio.run(middleware.dispatch(request, call_next))
+
+        self.assertEqual(response.status_code, 200)
+        call_next.assert_awaited_once()
+
+    def test_sensitive_api_denies_cloud_run_loopback_when_auth_disabled(self) -> None:
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/system/config",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        request = Request(scope)
+        middleware = AuthMiddleware(app=MagicMock())
+        call_next = AsyncMock(return_value=Response(status_code=200))
+
+        with patch("api.middlewares.auth.is_auth_enabled", return_value=False), \
+             patch.dict(os.environ, {"K_SERVICE": "daily-stock-analysis"}):
             response = asyncio.run(middleware.dispatch(request, call_next))
 
         self.assertEqual(response.status_code, 401)

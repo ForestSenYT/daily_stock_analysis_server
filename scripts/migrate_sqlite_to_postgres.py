@@ -20,6 +20,7 @@ What this script does:
        * portfolio_corporate_actions
        * broker_sync_runs
        * broker_snapshots
+       * trade_executions
 
      Cache/derived tables (stock_daily, news_intel, fundamental_snapshot,
      analysis_history, backtest_*, portfolio_positions / lots / snapshots,
@@ -83,6 +84,7 @@ A_CLASS_TABLES_IN_ORDER: List[str] = [
     "portfolio_corporate_actions",
     "broker_sync_runs",
     "broker_snapshots",
+    "trade_executions",
 ]
 
 

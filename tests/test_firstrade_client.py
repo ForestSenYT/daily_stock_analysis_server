@@ -255,9 +255,14 @@ class HelperTests(unittest.TestCase):
             "cookie": "c",
             "Authorization": "Bearer x",
             "account": "112233",
+            "accountId": "A-112233",
             "account_number": "123",
+            "orderNo": "ORD123",
+            "refreshToken": "refresh",
+            "setCookie": "session=c",
             "nested": {
                 "ACCESS-TOKEN": "boop",
+                "csrfToken": "csrf",
                 "fine": "ok",
             },
             "items": [{"cookies": ["c"], "symbol": "AAPL"}],
@@ -272,8 +277,13 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(cleaned["cookie"], "***REDACTED***")
         self.assertEqual(cleaned["Authorization"], "***REDACTED***")
         self.assertEqual(cleaned["account"], "***REDACTED***")
+        self.assertEqual(cleaned["accountId"], "***REDACTED***")
         self.assertEqual(cleaned["account_number"], "***REDACTED***")
+        self.assertEqual(cleaned["orderNo"], "***REDACTED***")
+        self.assertEqual(cleaned["refreshToken"], "***REDACTED***")
+        self.assertEqual(cleaned["setCookie"], "***REDACTED***")
         self.assertEqual(cleaned["nested"]["ACCESS-TOKEN"], "***REDACTED***")
+        self.assertEqual(cleaned["nested"]["csrfToken"], "***REDACTED***")
         self.assertEqual(cleaned["nested"]["fine"], "ok")
         self.assertEqual(cleaned["items"][0]["cookies"], "***REDACTED***")
         self.assertEqual(cleaned["items"][0]["symbol"], "AAPL")

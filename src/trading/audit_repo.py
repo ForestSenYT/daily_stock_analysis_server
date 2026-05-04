@@ -24,6 +24,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, desc, func, select
+from sqlalchemy.exc import IntegrityError
 
 from src.storage import DatabaseManager, TradeExecution
 from src.trading.types import (
@@ -114,7 +115,13 @@ class TradeExecutionRepository:
                 requested_at=_utc_now(),
             )
             session.add(row)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                raise DuplicateRequestUidError(
+                    f"request_uid={request.request_uid!r} already exists"
+                ) from exc
             session.refresh(row)
             return int(row.id)
 

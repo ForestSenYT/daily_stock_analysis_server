@@ -33,7 +33,14 @@ SENSITIVE_KEYS = (
     "cookie",
     "cookies",
     "access_token",
+    "accessToken",
+    "refreshToken",
+    "setCookie",
     "authorization",
+    "account_id",
+    "accountId",
+    "orderNo",
+    "order_id",
 )
 
 SENSITIVE_VALUES = (
@@ -45,6 +52,11 @@ SENSITIVE_VALUES = (
     "SIDVALUE-ABC",
     "MyCookieValue",
     "Bearer ACCESS-XYZ",
+    "ACCESS-CAMEL-XYZ",
+    "REFRESH-CAMEL-XYZ",
+    "SetCookieSecret",
+    "ACCOUNT-ID-SECRET",
+    "ORDER-NO-SECRET",
 )
 
 
@@ -78,7 +90,13 @@ def _poisoned_response(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
                     "sid": "SIDVALUE-ABC",
                     "cookie": "MyCookieValue",
                     "Authorization": "Bearer ACCESS-XYZ",
+                    "accessToken": "ACCESS-CAMEL-XYZ",
+                    "refreshToken": "REFRESH-CAMEL-XYZ",
+                    "setCookie": "SetCookieSecret",
                     "account": "112233445566",
+                    "account_id": "ACCOUNT-ID-SECRET",
+                    "id": "9876543210123",
+                    "orderNo": "ORDER-NO-SECRET",
                     "symbol": "AAPL",
                 },
             },
@@ -240,7 +258,13 @@ class BrokerLeakTests(unittest.TestCase):
             "SIDVALUE-ABC",
             "MyCookieValue",
             "Bearer ACCESS-XYZ",
+            "ACCESS-CAMEL-XYZ",
+            "REFRESH-CAMEL-XYZ",
+            "SetCookieSecret",
             "112233445566",           # full account number
+            "ACCOUNT-ID-SECRET",
+            "9876543210123",          # generic raw entity id
+            "ORDER-NO-SECRET",
         ):
             self.assertNotIn(
                 sentinel.lower(), lower,

@@ -187,25 +187,48 @@ class BrokerSnapshotRepository:
         self, snapshot: Any, *, broker: Optional[str] = None,
     ) -> Dict[str, int]:
         """Persist every leg of a :class:`brokers.base.BrokerSnapshot`."""
-        target_broker = broker or getattr(snapshot, "broker", None) or self.DEFAULT_BROKER
-        counts = {
-            "accounts": self.save_accounts(
-                getattr(snapshot, "accounts", []) or [], broker=target_broker,
-            ),
-            "balances": self.save_balances(
-                getattr(snapshot, "balances", []) or [], broker=target_broker,
-            ),
-            "positions": self.save_positions(
-                getattr(snapshot, "positions", []) or [], broker=target_broker,
-            ),
-            "orders": self.save_orders(
-                getattr(snapshot, "orders", []) or [], broker=target_broker,
-            ),
-            "transactions": self.save_transactions(
-                getattr(snapshot, "transactions", []) or [], broker=target_broker,
-            ),
-        }
-        return counts
+        target_broker = (
+            broker or getattr(snapshot, "broker", None) or self.DEFAULT_BROKER
+        )
+        with self.db.get_session() as session:
+            try:
+                counts = {
+                    "accounts": self._insert_rows_in_session(
+                        session,
+                        "account",
+                        getattr(snapshot, "accounts", []) or [],
+                        target_broker,
+                    ),
+                    "balances": self._insert_rows_in_session(
+                        session,
+                        "balance",
+                        getattr(snapshot, "balances", []) or [],
+                        target_broker,
+                    ),
+                    "positions": self._insert_rows_in_session(
+                        session,
+                        "position",
+                        getattr(snapshot, "positions", []) or [],
+                        target_broker,
+                    ),
+                    "orders": self._insert_rows_in_session(
+                        session,
+                        "order",
+                        getattr(snapshot, "orders", []) or [],
+                        target_broker,
+                    ),
+                    "transactions": self._insert_rows_in_session(
+                        session,
+                        "transaction",
+                        getattr(snapshot, "transactions", []) or [],
+                        target_broker,
+                    ),
+                }
+                session.commit()
+                return counts
+            except Exception:
+                session.rollback()
+                raise
 
     # ------------------------------------------------------------------
     # Snapshot reads
@@ -286,36 +309,50 @@ class BrokerSnapshotRepository:
         rows: Iterable[Any],
         broker: str,
     ) -> int:
+        with self.db.get_session() as session:
+            try:
+                count = self._insert_rows_in_session(session, snapshot_type, rows, broker)
+                session.commit()
+                return count
+            except Exception:
+                session.rollback()
+                raise
+
+    def _insert_rows_in_session(
+        self,
+        session: Any,
+        snapshot_type: str,
+        rows: Iterable[Any],
+        broker: str,
+    ) -> int:
         materialized = list(rows or [])
         if not materialized:
             return 0
-        with self.db.get_session() as session:
-            for item in materialized:
-                payload = self._dataclass_to_dict(item)
-                # Final defensive redaction pass right before INSERT.
-                redacted_payload = redact_sensitive_payload(payload)
-                payload_json = json.dumps(
-                    redacted_payload, ensure_ascii=False, default=str,
+        for item in materialized:
+            payload = self._dataclass_to_dict(item)
+            # Final defensive redaction pass right before INSERT.
+            redacted_payload = redact_sensitive_payload(payload)
+            payload_json = json.dumps(
+                redacted_payload, ensure_ascii=False, default=str,
+            )
+            session.add(
+                BrokerSnapshot(
+                    broker=broker,
+                    snapshot_type=snapshot_type,
+                    account_hash=str(redacted_payload.get("account_hash") or ""),
+                    account_last4=str(redacted_payload.get("account_last4") or "") or None,
+                    account_alias=str(redacted_payload.get("account_alias") or "") or None,
+                    entity_hash=str(
+                        redacted_payload.get("order_id_hash")
+                        or redacted_payload.get("transaction_id_hash")
+                        or ""
+                    ) or None,
+                    symbol=str(redacted_payload.get("symbol") or "") or None,
+                    payload_json=payload_json,
+                    as_of=self._coerce_dt(redacted_payload.get("as_of")) or _now_utc(),
                 )
-                session.add(
-                    BrokerSnapshot(
-                        broker=broker,
-                        snapshot_type=snapshot_type,
-                        account_hash=str(redacted_payload.get("account_hash") or ""),
-                        account_last4=str(redacted_payload.get("account_last4") or "") or None,
-                        account_alias=str(redacted_payload.get("account_alias") or "") or None,
-                        entity_hash=str(
-                            redacted_payload.get("order_id_hash")
-                            or redacted_payload.get("transaction_id_hash")
-                            or ""
-                        ) or None,
-                        symbol=str(redacted_payload.get("symbol") or "") or None,
-                        payload_json=payload_json,
-                        as_of=self._coerce_dt(redacted_payload.get("as_of")) or _now_utc(),
-                    )
-                )
-            session.commit()
-            return len(materialized)
+            )
+        return len(materialized)
 
     @staticmethod
     def _dataclass_to_dict(item: Any) -> Dict[str, Any]:

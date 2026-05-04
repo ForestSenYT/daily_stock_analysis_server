@@ -246,12 +246,16 @@ _REDACT_KEYS = frozenset({
     "token",
     "access_token",
     "access-token",
+    "refresh_token",
+    "session_token",
     "ftat",
     "sid",
     "cookie",
     "cookies",
+    "set_cookie",
     "authorization",
     "account",
+    "account_id",
     "account_number",
     "accountno",
     "accountnumber",
@@ -261,8 +265,31 @@ _REDACT_KEYS = frozenset({
     "session_id",
     "sessionid",
     "auth",
+    "csrf",
+    "csrf_token",
+    "xsrf",
+    "xsrf_token",
     "credentials",
     "credential",
+})
+
+_REDACT_CANONICAL_KEYS = frozenset(
+    "".join(ch for ch in key.lower() if ch.isalnum())
+    for key in _REDACT_KEYS
+) | frozenset({
+    "accesstoken",
+    "refreshtoken",
+    "sessiontoken",
+    "setcookie",
+    "accountid",
+    "orderno",
+    "ordernumber",
+    "orderid",
+    "transactionid",
+    "historyid",
+    "tradeid",
+    "csrftoken",
+    "xsrftoken",
 })
 
 _REDACTED_VALUE = "***REDACTED***"
@@ -271,7 +298,11 @@ _REDACTED_VALUE = "***REDACTED***"
 def _is_sensitive_key(key: Any) -> bool:
     if not isinstance(key, str):
         return False
-    return key.strip().lower().replace("-", "_") in _REDACT_KEYS
+    normalized = key.strip().lower().replace("-", "_")
+    if normalized in _REDACT_KEYS:
+        return True
+    canonical = "".join(ch for ch in key.strip().lower() if ch.isalnum())
+    return canonical in _REDACT_CANONICAL_KEYS
 
 
 def redact_sensitive_payload(payload: Any) -> Any:

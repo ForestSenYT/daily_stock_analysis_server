@@ -45,6 +45,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import (
     declarative_base,
     sessionmaker,
@@ -56,6 +57,14 @@ from src.config import get_config
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+
+
+def _safe_db_url_for_log(db_url: str) -> str:
+    """Render database URLs without credentials for operational logs."""
+    try:
+        return make_url(str(db_url)).render_as_string(hide_password=True)
+    except Exception:
+        return "<redacted-db-url>"
 
 # SQLAlchemy ORM 基类
 Base = declarative_base()
@@ -839,7 +848,7 @@ class DatabaseManager:
                 Base.metadata.create_all(self._engine)
 
                 self._initialized = True
-                logger.info(f"数据库初始化完成: {db_url}")
+                logger.info("数据库初始化完成: %s", _safe_db_url_for_log(db_url))
 
                 # 注册退出钩子，确保程序退出时关闭数据库连接
                 atexit.register(DatabaseManager._cleanup_engine, self._engine)

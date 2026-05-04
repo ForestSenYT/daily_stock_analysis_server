@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 收紧未启用登录时的敏感 API 边界：远程客户端访问 system config、Firstrade broker 和 trading 端点时仍要求管理员认证，并将配置读取中的敏感值默认脱敏。
+- [修复] 脱敏数据库连接串日志和 broker payload/API 响应中的 camelCase token、account id、order id 等敏感字段。
+- [修复] 修正 Postgres portfolio 写事务、trade execution 幂等冲突翻译、Firstrade full snapshot 单事务写入和 SQLite 到 Postgres 迁移遗漏 trade_executions 审计表的问题。
+
 - [新功能] Quant Research Lab Phase 3：研究级策略回测引擎落地——`src/quant_research/backtest/`（engine/costs/metrics）+ API `POST /api/v1/quant/backtests/run` 与 `GET /api/v1/quant/backtests/{run_id}`，支持 top-k long-only / 仿真多空 / 等权基准三种策略、daily/weekly/monthly 调仓、commission+slippage 成本模型、可选 benchmark 比较，输出 Sharpe/Sortino/Calmar/最大回撤/turnover/IR 等 13 项指标。
 - [新功能] 回测引擎默认启用 1 个交易日的信号滞后（structural no-lookahead guard）；`lookahead_bias_guard` 在 diagnostics 中显式为 true；assumptions 中记录 commission_bps / slippage_bps / rebalance_frequency / allows_short / engine_version。
 - [文档] `docs/quant-research-lab.md` 新增 Phase 3 端点说明、策略类型、causality 约束与硬上限。

@@ -239,6 +239,19 @@ class AuthSetPasswordTestCase(unittest.TestCase):
             auth._auth_enabled = None
             self.assertTrue(auth._is_auth_enabled_from_env())
 
+    def test_is_auth_enabled_from_env_prefers_runtime_env(self) -> None:
+        custom_env = self.data_dir / "custom.env"
+        custom_env.write_text("ADMIN_AUTH_ENABLED=false\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"ENV_FILE": str(custom_env), "ADMIN_AUTH_ENABLED": "true"}):
+            auth._auth_enabled = None
+            self.assertTrue(auth._is_auth_enabled_from_env())
+
+        custom_env.write_text("ADMIN_AUTH_ENABLED=true\n", encoding="utf-8")
+        with patch.dict(os.environ, {"ENV_FILE": str(custom_env), "ADMIN_AUTH_ENABLED": "false"}):
+            auth._auth_enabled = None
+            self.assertFalse(auth._is_auth_enabled_from_env())
+
     def test_refresh_auth_state_clears_session_secret_cache(self) -> None:
         def run():
             first_secret = auth.create_session()
