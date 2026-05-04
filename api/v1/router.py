@@ -11,7 +11,7 @@ API v1 路由聚合
 
 from fastapi import APIRouter
 
-from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research, broker, trading
+from api.v1.endpoints import analysis, auth, history, stocks, backtest, system_config, agent, usage, portfolio, schedule, quant_research, broker, trading, ai_sandbox
 
 # 创建 v1 版本主路由
 router = APIRouter(prefix="/api/v1")
@@ -106,4 +106,19 @@ router.include_router(
     trading.router,
     prefix="/trading",
     tags=["Trading"],
+)
+
+# AI sandbox — forward-simulation training data pipeline.
+# Independent of the trading framework; writes to ai_sandbox_executions
+# only, never touches portfolio_trades / trade_executions. All endpoints
+# 503 when ``AI_SANDBOX_ENABLED=false``.
+router.include_router(
+    ai_sandbox.sandbox_router,
+    prefix="/ai-sandbox",
+    tags=["AISandbox"],
+)
+router.include_router(
+    ai_sandbox.training_router,
+    prefix="/ai-training",
+    tags=["AITraining"],
 )

@@ -924,6 +924,28 @@ class Config:
     # 混入真实持仓聚合）。空 = 使用 OrderRequest.account_id（必须）。
     trading_paper_account_id: Optional[int] = None
 
+    # === AI 训练沙盒（独立于 trading 框架的 forward-simulation 子系统） ===
+    # 跑 AI 决策训练数据：用现有实时行情模拟成交，写入独立的
+    # ``ai_sandbox_executions`` 表，**完全不进** portfolio_trades / trade_executions。
+    # 即使 TRADING_MODE=live 沙盒路径仍走纸面，是硬不变量。
+    ai_sandbox_enabled: bool = False
+    # 沙盒 RiskEngine 的阀值（独立于 trading 框架）
+    ai_sandbox_max_position_value: float = 5000.0
+    ai_sandbox_max_position_pct: float = 0.20
+    ai_sandbox_max_daily_turnover: float = 100000.0
+    ai_sandbox_symbol_allowlist: List[str] = field(default_factory=list)
+    ai_sandbox_symbol_denylist: List[str] = field(default_factory=list)
+    # 沙盒一般 24x7 跑（含盘后 / 节假日实验），默认非严格
+    ai_sandbox_market_hours_strict: bool = False
+    ai_sandbox_paper_slippage_bps: int = 10
+    ai_sandbox_paper_fee_per_trade: float = 0.0
+    # 后台 daemon：定时让 AI agent 对自选股池跑一轮决策
+    ai_sandbox_daemon_enabled: bool = False
+    ai_sandbox_daemon_interval_minutes: int = 60
+    ai_sandbox_daemon_watchlist: List[str] = field(default_factory=list)
+    # 默认 prompt 版本号 —— 让 metrics 能按 prompt 分组
+    ai_sandbox_default_prompt_version: str = "v1"
+
     # === 输入校验加固（防 LLM 幻觉） ===
     # 当一只"股票代码"在所有数据源（实时行情 / 历史 K 线 / 基本面）
     # 都查不到数据时，是否短路——直接拒绝继续分析，避免 LLM 凭训练
@@ -1700,6 +1722,54 @@ class Config:
             trading_paper_account_id=cls._parse_optional_int(
                 os.getenv('TRADING_PAPER_ACCOUNT_ID'),
             ),
+            ai_sandbox_enabled=parse_env_bool(
+                os.getenv('AI_SANDBOX_ENABLED'), False,
+            ),
+            ai_sandbox_max_position_value=parse_env_float(
+                os.getenv('AI_SANDBOX_MAX_POSITION_VALUE'), 5000.0,
+                field_name='AI_SANDBOX_MAX_POSITION_VALUE', minimum=0.0,
+            ),
+            ai_sandbox_max_position_pct=parse_env_float(
+                os.getenv('AI_SANDBOX_MAX_POSITION_PCT'), 0.20,
+                field_name='AI_SANDBOX_MAX_POSITION_PCT',
+                minimum=0.0, maximum=1.0,
+            ),
+            ai_sandbox_max_daily_turnover=parse_env_float(
+                os.getenv('AI_SANDBOX_MAX_DAILY_TURNOVER'), 100000.0,
+                field_name='AI_SANDBOX_MAX_DAILY_TURNOVER', minimum=0.0,
+            ),
+            ai_sandbox_symbol_allowlist=cls._parse_csv_symbols(
+                os.getenv('AI_SANDBOX_SYMBOL_ALLOWLIST'),
+            ),
+            ai_sandbox_symbol_denylist=cls._parse_csv_symbols(
+                os.getenv('AI_SANDBOX_SYMBOL_DENYLIST'),
+            ),
+            ai_sandbox_market_hours_strict=parse_env_bool(
+                os.getenv('AI_SANDBOX_MARKET_HOURS_STRICT'), False,
+            ),
+            ai_sandbox_paper_slippage_bps=parse_env_int(
+                os.getenv('AI_SANDBOX_PAPER_SLIPPAGE_BPS'), 10,
+                field_name='AI_SANDBOX_PAPER_SLIPPAGE_BPS',
+                minimum=0, maximum=1000,
+            ),
+            ai_sandbox_paper_fee_per_trade=parse_env_float(
+                os.getenv('AI_SANDBOX_PAPER_FEE_PER_TRADE'), 0.0,
+                field_name='AI_SANDBOX_PAPER_FEE_PER_TRADE', minimum=0.0,
+            ),
+            ai_sandbox_daemon_enabled=parse_env_bool(
+                os.getenv('AI_SANDBOX_DAEMON_ENABLED'), False,
+            ),
+            ai_sandbox_daemon_interval_minutes=parse_env_int(
+                os.getenv('AI_SANDBOX_DAEMON_INTERVAL_MINUTES'), 60,
+                field_name='AI_SANDBOX_DAEMON_INTERVAL_MINUTES',
+                minimum=5, maximum=1440,
+            ),
+            ai_sandbox_daemon_watchlist=cls._parse_csv_symbols(
+                os.getenv('AI_SANDBOX_DAEMON_WATCHLIST'),
+            ),
+            ai_sandbox_default_prompt_version=(
+                os.getenv('AI_SANDBOX_DEFAULT_PROMPT_VERSION') or 'v1'
+            ).strip() or 'v1',
             strict_unknown_stock_guard=os.getenv('STRICT_UNKNOWN_STOCK_GUARD', 'true').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),

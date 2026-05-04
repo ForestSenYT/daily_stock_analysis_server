@@ -132,12 +132,28 @@ async def app_lifespan(app: FastAPI):
             "[app] broker auto-sync startup failed (continuing without it)",
             exc_info=True,
         )
+    # AI sandbox daemon — optional forward-simulation training loop.
+    # No-op when ``AI_SANDBOX_DAEMON_ENABLED=false``.
+    try:
+        from src.services.ai_sandbox_daemon import start_ai_sandbox_daemon
+        start_ai_sandbox_daemon()
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "[app] AI sandbox daemon startup failed (continuing without it)",
+            exc_info=True,
+        )
     try:
         yield
     finally:
         try:
             from src.services.broker_auto_sync_service import stop_auto_sync
             stop_auto_sync(timeout=5.0)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from src.services.ai_sandbox_daemon import stop_ai_sandbox_daemon
+            stop_ai_sandbox_daemon(timeout=5.0)
         except Exception:  # noqa: BLE001
             pass
         if hasattr(app.state, "system_config_service"):

@@ -766,6 +766,106 @@ class TradeExecution(Base):
     )
 
 
+class AISandboxExecution(Base):
+    """AI training-sandbox forward-simulation row.
+
+    Strict isolation from real data:
+      * Independent table — does NOT join into ``portfolio_trades``,
+        ``trade_executions``, or any aggregate.
+      * No ``portfolio_trade_id`` (sandbox writes nothing back to the
+        portfolio book).
+      * Always status='filled' or 'failed' or 'blocked' — there is no
+        live broker round-trip, so 'pending' is transient only.
+
+    Schema mirrors :class:`TradeExecution` but adds AI-specific
+    columns (agent_run_id / prompt_version / confidence / reasoning /
+    P&L horizons) so a single forward-sim batch can be analysed
+    end-to-end without joins.
+    """
+
+    __tablename__ = 'ai_sandbox_executions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_uid = Column(String(64), nullable=False, unique=True, index=True)
+
+    # Trade core
+    symbol = Column(String(16), nullable=False, index=True)
+    side = Column(String(8), nullable=False)               # buy | sell
+    order_type = Column(String(16), nullable=False)        # market | limit
+    quantity = Column(Float, nullable=False)
+    limit_price = Column(Float, nullable=True)
+    market = Column(String(8), nullable=True)
+    currency = Column(String(8), nullable=True)
+
+    # AI metadata
+    agent_run_id = Column(String(100), nullable=True, index=True)
+    prompt_version = Column(String(64), nullable=True, index=True)
+    confidence_score = Column(Float, nullable=True)
+    reasoning_text = Column(Text, nullable=True)
+    model_used = Column(String(100), nullable=True)
+
+    # Fill outcome
+    status = Column(String(16), nullable=False, index=True)  # pending | filled | blocked | failed
+    risk_decision = Column(String(8), nullable=True)         # allow | block
+    risk_flags_json = Column(Text, nullable=True)
+    fill_price = Column(Float, nullable=True)
+    fill_quantity = Column(Float, nullable=True)
+    fill_time = Column(DateTime, nullable=True)
+
+    # Audit payloads
+    intent_payload_json = Column(Text, nullable=False)
+    result_payload_json = Column(Text, nullable=True)
+    quote_payload_json = Column(Text, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(String(512), nullable=True)
+
+    # P&L horizons (filled in by post-fact computation)
+    pnl_horizons_json = Column(Text, nullable=True)
+    pnl_computed_at = Column(DateTime, nullable=True, index=True)
+
+    requested_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_ai_sandbox_run_requested', 'agent_run_id', 'requested_at'),
+        Index('ix_ai_sandbox_symbol_requested', 'symbol', 'requested_at'),
+        Index('ix_ai_sandbox_status_requested', 'status', 'requested_at'),
+    )
+
+
+class AITrainingLabel(Base):
+    """Human-supplied outcome label for AI predictions.
+
+    Sources covered:
+      * ``analysis_history`` — links to AnalysisHistory row
+      * ``ai_sandbox`` — links to AISandboxExecution row
+
+    Used to assemble fine-tune datasets: combine the source row's
+    prompt+output with the user-supplied label and ``outcome_text``
+    into a JSONL training example.
+    """
+
+    __tablename__ = 'ai_training_labels'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_kind = Column(String(32), nullable=False, index=True)  # analysis_history | ai_sandbox
+    source_id = Column(Integer, nullable=False, index=True)
+    label = Column(String(16), nullable=False, index=True)        # correct | incorrect | unclear
+    outcome_text = Column(Text, nullable=True)                    # "what actually happened"
+    user_notes = Column(Text, nullable=True)
+    created_by = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+
+    __table_args__ = (
+        # One label per (source_kind, source_id) — re-labeling overwrites
+        UniqueConstraint(
+            'source_kind', 'source_id',
+            name='uix_ai_training_label_source',
+        ),
+        Index('ix_ai_training_label_kind_label', 'source_kind', 'label'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式

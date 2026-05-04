@@ -36,6 +36,8 @@ SENSITIVE_API_PREFIXES = (
     "/api/v1/system/config",
     "/api/v1/broker/firstrade",
     "/api/v1/trading",
+    "/api/v1/ai-sandbox",
+    "/api/v1/ai-training",
 )
 
 

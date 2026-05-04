@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] Firstrade 数据自动同步：`BROKER_FIRSTRADE_AUTO_SYNC_ENABLED=true` 时启动期拉后台 daemon 线程，每 N 分钟跑一次 `sync_now`；session 失效静默跳过；可配置 `BROKER_FIRSTRADE_AUTO_SYNC_INTERVAL_MINUTES`（1..1440）。
 - [测试] 新增 8 个 trading 测试文件 46 用例：types/risk_engine（14 项）/paper_executor/audit_repo/service/api/agent/invariant_guard，AST 不变量检查保证 `firstrade.order` 在 src/api 内零真实 import。
 - [文档] 新增 `docs/trading-framework.md`：架构 + 数据流 + Phase A vs B/C 边界 + 回滚策略。
+- [新功能] AI 训练沙盒（Phase A+C 基础）：`AI_SANDBOX_ENABLED` 总开关；`AISandboxService` 让 AI agent 自主跑买卖决策、用最近实时行情模拟成交、写入独立 `ai_sandbox_executions` 表（**完全不进** portfolio_trades / trade_executions）；P&L 1/3/7/30 日 horizon 后台回算用于评估 prompt / 模型表现；可选定时 daemon 按 watchlist 自动跑（`AI_SANDBOX_DAEMON_ENABLED` + `AI_SANDBOX_DAEMON_INTERVAL_MINUTES` + `AI_SANDBOX_DAEMON_WATCHLIST`）。
+- [新功能] 训练数据标注：新表 `ai_training_labels` + 7 个端点 `/api/v1/ai-training/*`，支持 upsert / 删除 / 列表 / 数据集统计；标签可指向 `analysis_history` 或 `ai_sandbox` 行（UNIQUE 一对一）。
+- [新功能] PortfolioPage 新增「AI 训练沙盒」面板：状态 + 风险阀值 + 「让 AI 跑一次」单股触发 + 最近 15 笔执行表（含 1d/7d P&L horizon）+ 标注表单 + 数据集统计。
+- [测试] 新增 `tests/test_ai_sandbox.py` 18 cases 覆盖 types round-trip / repo CRUD / 沙盒服务 5 路径 / labels 4 路径 / **隔离不变量**（沙盒成交不写 portfolio_trades）。
+- [文档] 新增 `docs/ai-training-sandbox.md`：架构 + 数据流 + 配置 + API + Phase B 兼容性。
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
