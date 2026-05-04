@@ -169,7 +169,6 @@ const AISandboxPanel: React.FC = () => {
   }, [labelSourceKind, labelSourceId, labelKind, labelOutcome]);
 
   const winRate1d = useMemo(() => metrics?.winRate1d ?? null, [metrics]);
-  const winRate7d = useMemo(() => metrics?.winRate7d ?? null, [metrics]);
 
   if (mode === 'loading' || mode === 'disabled') return null;
 
